@@ -20,11 +20,14 @@ package org.apache.cassandra.db;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
+
 import java.util.stream.Collectors;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 
+import org.apache.cassandra.dht.Murmur3Partitioner;
+import org.apache.cassandra.memory.*;
 import org.apache.commons.lang3.tuple.Pair;
 
 import org.apache.cassandra.cache.IRowCacheEntry;
@@ -43,6 +46,11 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReadsListener;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.memory.persistent.PCFFilter;
+import org.apache.cassandra.memory.persistent.PMTableUnfilteredRowIterator;
+import org.apache.cassandra.memory.persistent.PersistentColumnFamilySortedMap;
+import org.apache.cassandra.memory.persistent.PersistentLongToken;
+import org.apache.cassandra.memory.persistent.PersistentRowSingle;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
@@ -503,11 +511,20 @@ public class SinglePartitionReadCommand extends ReadCommand
          *      and counters are intrinsically a collection of shards and so have the same problem).
          */
         if (clusteringIndexFilter() instanceof ClusteringIndexNamesFilter && !queriesMulticellType())
-            return queryMemtableAndSSTablesInTimestampOrder(cfs, (ClusteringIndexNamesFilter)clusteringIndexFilter());
+        {
+            // persistent memory related changes BEGIN
+            return queryMemtableAndTableInTimestampOrder(cfs, (ClusteringIndexNamesFilter) clusteringIndexFilter());
+            // return queryMemtableAndSSTablesInTimestampOrder(cfs, (ClusteringIndexNamesFilter) clusteringIndexFilter());
+        }
 
-        Tracing.trace("Acquiring sstable references");
+        return queryMemtableAndTableInternal(cfs);
+        // persistent memory related changes END
+
+        /*Tracing.trace("Acquiring sstable references");
         ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
+
         List<UnfilteredRowIterator> iterators = new ArrayList<>(Iterables.size(view.memtables) + view.sstables.size());
+
         ClusteringIndexFilter filter = clusteringIndexFilter();
         long minTimestamp = Long.MAX_VALUE;
 
@@ -527,7 +544,7 @@ public class SinglePartitionReadCommand extends ReadCommand
                 iterators.add(iter);
             }
 
-            /*
+            *//*
              * We can't eliminate full sstables based on the timestamp of what we've already read like
              * in collectTimeOrderedData, but we still want to eliminate sstable whose maxTimestamp < mostRecentTombstone
              * we've read. We still rely on the sstable ordering by maxTimestamp since if
@@ -538,7 +555,7 @@ public class SinglePartitionReadCommand extends ReadCommand
              *   timestamp(tombstone) <= maxTimestamp_s1
              * In other words, iterating in maxTimestamp order allow to do our mostRecentPartitionTombstone elimination
              * in one pass, and minimize the number of sstables for which we read a partition tombstone.
-             */
+             *//*
             Collections.sort(view.sstables, SSTableReader.maxTimestampComparator);
             long mostRecentPartitionTombstone = Long.MIN_VALUE;
             int nonIntersectingSSTables = 0;
@@ -618,10 +635,119 @@ public class SinglePartitionReadCommand extends ReadCommand
                 e.addSuppressed(suppressed);
             }
             throw e;
+        }*/
+    }
+
+    private UnfilteredRowIterator queryMemtableAndTableInternal(ColumnFamilyStore cfs)
+    {
+
+        Tracing.trace("Acquiring pmtable reference");
+        ColumnFamilyStore.MTableViewFragment view = cfs.selectMTable(View.selectTable());
+
+        List<UnfilteredRowIterator> iterators = new ArrayList<>(Iterables.size(view.memtables)   + 1);;
+
+        ClusteringIndexFilter filter = clusteringIndexFilter();
+        //long minTimestamp = Long.MAX_VALUE;
+
+        try
+        {
+            /*for (Memtable memtable : view.memtables)
+            {
+                Partition partition = memtable.getPartition(partitionKey());
+                if (partition == null)
+                    continue;
+
+                minTimestamp = Math.min(minTimestamp, memtable.getMinTimestamp());
+
+                @SuppressWarnings("resource") // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
+                UnfilteredRowIterator iter = filter.getUnfilteredRowIterator(columnFilter(), partition);
+                oldestUnrepairedTombstone = Math.min(oldestUnrepairedTombstone, partition.stats().minLocalDeletionTime);
+                iterators.add(iter);
+            }*/
+
+            MTable mTable = view.mtable;
+            if(mTable != null)
+            {
+                //Find if the partition key we are looking for is available in this table
+                Object partition = mTable.get(partitionKey);
+                if (partition != null)
+                {
+                    //if clusteringkey is available iterate the map else the list
+                    if (mTable.doesClusteringKeyExist())
+                    {
+                        //A slice of a partition is being requested
+                        if (filter.getSlices(cfs.metadata()).hasUpperBound())
+                        {
+                            MCFFilter cfFilter = new PCFFilter(cfs.metadata());
+                            //assert cfFilter != null : "CFFilter is null.";
+
+                            try (UnfilteredRowIterator iter = cfFilter.getSliceIterator(filter, ((PersistentColumnFamilySortedMap) partition).entrySet().iterator(), cfs.metadata(), mTable.getTableMetadata(), partitionKey()))
+                            {
+                                if (!iter.isEmpty())
+                                    iterators.add(iter);
+                                //    continue;
+
+
+                            }
+                        }
+                        else
+                        {
+                            //Gets a partition
+                            MTableUnfilteredRowIterator mapIterator = new PMTableUnfilteredRowIterator(partitionKey.getKey(),
+                                                                                                       cfs.metadata(),
+                                                                                                       mTable.getTableMetadata(),
+                                                                                                       (PersistentColumnFamilySortedMap) partition);
+                            //assert mapIterator != null : "MapIterator is null.";
+
+                            if (!mapIterator.isEmpty())
+                                iterators.add(mapIterator);
+                            // continue;
+
+
+                        }
+                    }
+                    else
+                    {
+                        //Gets a single row
+                        MTableUnfilteredRowIterator rowSingleIterator = new PMTableUnfilteredRowIterator(partitionKey.getKey(),
+                                                                                                         cfs.metadata(),
+                                                                                                         mTable.getTableMetadata(),
+                                                                                                         (PersistentRowSingle) partition);
+                        //assert rowSingleIterator != null : "SingleRowIterator is null.";
+
+                        if (!rowSingleIterator.isEmpty())
+                            iterators.add(rowSingleIterator);
+                        //  continue;
+
+
+                    }
+                }
+            }
+
+
+
+            if (iterators.isEmpty())
+                return EmptyIterators.unfilteredRow(cfs.metadata(), partitionKey(), filter.isReversed());
+
+            StorageHook.instance.reportRead(cfs.metadata().id, partitionKey());
+         //   UnfilteredRowIterator merged = UnfilteredRowIterators.merge(iterators, nowInSec());
+            return UnfilteredRowIterators.merge(iterators, nowInSec());
+        }
+        catch (RuntimeException | Error e)
+        {
+            try
+            {
+                FBUtilities.closeAll(iterators);
+            }
+            catch (Exception suppressed)
+            {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
         }
     }
 
-    private boolean shouldInclude(SSTableReader sstable)
+   /* private boolean shouldInclude(SSTableReader sstable)
     {
         // If some static columns are queried, we should always include the sstable: the clustering values stats of the sstable
         // don't tell us if the sstable contains static values in particular.
@@ -630,9 +756,9 @@ public class SinglePartitionReadCommand extends ReadCommand
             return true;
 
         return clusteringIndexFilter().shouldInclude(sstable);
-    }
+    }*/
 
-    private UnfilteredRowIteratorWithLowerBound makeIterator(ColumnFamilyStore cfs,
+    /*private UnfilteredRowIteratorWithLowerBound makeIterator(ColumnFamilyStore cfs,
                                                              SSTableReader sstable,
                                                              SSTableReadsListener listener)
     {
@@ -643,14 +769,14 @@ public class SinglePartitionReadCommand extends ReadCommand
                                                                   columnFilter(),
                                                                   listener);
 
-    }
+    }*/
 
     /**
      * Return a wrapped iterator that when closed will update the sstables iterated and READ sample metrics.
      * Note that we cannot use the Transformations framework because they greedily get the static row, which
      * would cause all iterators to be initialized and hence all sstables to be accessed.
      */
-    private UnfilteredRowIterator withSSTablesIterated(List<UnfilteredRowIterator> iterators,
+    /*private UnfilteredRowIterator withSSTablesIterated(List<UnfilteredRowIterator> iterators,
                                                        TableMetrics metrics,
                                                        SSTableReadMetricsCollector metricsCollector)
     {
@@ -673,7 +799,7 @@ public class SinglePartitionReadCommand extends ReadCommand
            }
         };
         return Transformation.apply(merged, new UpdateSstablesIterated());
-    }
+    }*/
 
     private boolean queriesMulticellType()
     {
@@ -694,7 +820,8 @@ public class SinglePartitionReadCommand extends ReadCommand
      * no collection or counters are included).
      * This method assumes the filter is a {@code ClusteringIndexNamesFilter}.
      */
-    private UnfilteredRowIterator queryMemtableAndSSTablesInTimestampOrder(ColumnFamilyStore cfs, ClusteringIndexNamesFilter filter)
+
+    /*private UnfilteredRowIterator queryMemtableAndSSTablesInTimestampOrder(ColumnFamilyStore cfs, ClusteringIndexNamesFilter filter)
     {
         Tracing.trace("Acquiring sstable references");
         ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
@@ -702,7 +829,7 @@ public class SinglePartitionReadCommand extends ReadCommand
         ImmutableBTreePartition result = null;
 
         Tracing.trace("Merging memtable contents");
-        for (Memtable memtable : view.memtables)
+        *//*for (Memtable memtable : view.memtables)
         {
             Partition partition = memtable.getPartition(partitionKey());
             if (partition == null)
@@ -715,9 +842,9 @@ public class SinglePartitionReadCommand extends ReadCommand
 
                 result = add(iter, result, filter, false);
             }
-        }
+        }*//*
 
-        /* add the SSTables on disk */
+        *//* add the SSTables on disk *//*
         Collections.sort(view.sstables, SSTableReader.maxTimestampComparator);
         boolean onlyUnrepaired = true;
         // read sorted sstables
@@ -808,6 +935,71 @@ public class SinglePartitionReadCommand extends ReadCommand
         }
 
         return result.unfilteredIterator(columnFilter(), Slices.ALL, clusteringIndexFilter().isReversed());
+    }*/
+
+
+    private UnfilteredRowIterator queryMemtableAndTableInTimestampOrder(ColumnFamilyStore cfs, ClusteringIndexNamesFilter filter)
+    {
+        Tracing.trace("Acquiring MTable references");
+        ColumnFamilyStore.MTableViewFragment view = cfs.selectMTable(View.selectTable());
+
+        ImmutableBTreePartition result = null;
+
+        Tracing.trace("Merging memtable contents");
+        for (Memtable memtable : view.memtables)
+        {
+            Partition partition = memtable.getPartition(partitionKey());
+            if (partition == null)
+                continue;
+
+            try (UnfilteredRowIterator iter = filter.getUnfilteredRowIterator(columnFilter(), partition))
+            {
+                if (iter.isEmpty())
+                    continue;
+
+                result = add(iter, result, filter, false);
+            }
+        }
+
+        MTable mTable = view.mtable;
+        if (mTable != null)
+        {
+            Object partition = mTable.get(partitionKey);
+            if (partition != null)
+            {
+                if (mTable.doesClusteringKeyExist())
+                {
+                    MCFFilter cfFilter = new PCFFilter(cfs.metadata());
+                    //assert cfFilter != null : "CFFilter is null.";
+                    try (UnfilteredRowIterator iter = cfFilter.getRowIterator(filter, partition, partitionKey()))
+                    {
+                        if (!iter.isEmpty())
+                            result = add(iter, result, filter, false);
+                        //  continue;
+                    }
+                }
+                else
+                {
+                    //TODO: This needs to be improved
+                    MTableUnfilteredRowIterator mTableUnfilteredRowIterator = new PMTableUnfilteredRowIterator(partitionKey.getKey(),
+                                                                                                               cfs.metadata(),
+                                                                                                               mTable.getTableMetadata(),
+                                                                                                               (PersistentRowSingle) partition);
+                   // assert mTableUnfilteredRowIterator != null : "Iterator is null.";
+
+                    if (!mTableUnfilteredRowIterator.isEmpty())
+                        result = add(mTableUnfilteredRowIterator, result, filter, false);
+                    //  continue;
+
+                }
+            }
+        }
+
+
+        if (result == null || result.isEmpty())
+            return EmptyIterators.unfilteredRow(metadata(), partitionKey(), false);
+
+        return result.unfilteredIterator(columnFilter(), Slices.ALL, clusteringIndexFilter().isReversed());
     }
 
     private ImmutableBTreePartition add(UnfilteredRowIterator iter, ImmutableBTreePartition result, ClusteringIndexNamesFilter filter, boolean isRepaired)
@@ -825,7 +1017,7 @@ public class SinglePartitionReadCommand extends ReadCommand
         }
     }
 
-    private ClusteringIndexNamesFilter reduceFilter(ClusteringIndexNamesFilter filter, Partition result, long sstableTimestamp)
+    /*private ClusteringIndexNamesFilter reduceFilter(ClusteringIndexNamesFilter filter, Partition result, long sstableTimestamp)
     {
         if (result == null)
             return filter;
@@ -874,9 +1066,9 @@ public class SinglePartitionReadCommand extends ReadCommand
             clusterings = newClusterings.build();
         }
         return new ClusteringIndexNamesFilter(clusterings, filter.isReversed());
-    }
+    }*/
 
-    private boolean canRemoveRow(Row row, Columns requestedColumns, long sstableTimestamp)
+    /*private boolean canRemoveRow(Row row, Columns requestedColumns, long sstableTimestamp)
     {
         // We can remove a row if it has data that is more recent that the next sstable to consider for the data that the query
         // cares about. And the data we care about is 1) the row timestamp (since every query cares if the row exists or not)
@@ -891,7 +1083,7 @@ public class SinglePartitionReadCommand extends ReadCommand
                 return false;
         }
         return true;
-    }
+    }*/
 
     @Override
     public String toString()

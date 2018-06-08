@@ -29,6 +29,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import javax.management.*;
 import javax.management.openmbean.*;
@@ -38,6 +39,14 @@ import com.google.common.base.*;
 import com.google.common.base.Throwables;
 import com.google.common.collect.*;
 import com.google.common.util.concurrent.*;
+
+import lib.util.persistent.PersistentString;
+import org.apache.cassandra.db.marshal.ListType;
+import org.apache.cassandra.db.marshal.MapType;
+import org.apache.cassandra.db.marshal.SetType;
+import org.apache.cassandra.memory.*;
+import org.apache.cassandra.memory.persistent.PMTableWriter;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,6 +78,9 @@ import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.*;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.memory.persistent.PMTable;
+import org.apache.cassandra.memory.persistent.PersistentColumnMetadata;
+import org.apache.cassandra.memory.persistent.PersistentTableMetadata;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.metrics.TableMetrics.Sampler;
 import org.apache.cassandra.schema.*;
@@ -191,6 +203,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public static final String SNAPSHOT_TRUNCATE_PREFIX = "truncated";
     public static final String SNAPSHOT_DROP_PREFIX = "dropped";
+
+    private PMTableWriter mTableWriter;
 
     static
     {
@@ -418,6 +432,129 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         logger.info("Initializing {}.{}", keyspace.getName(), name);
 
+        // Persistent memory related changes BEGIN
+        // The below code to to prepare persistent metadata required for reboots
+        MStorageWrapper mStorageWrapper;
+        MTableMetadata mTableMetadata;
+        mStorageWrapper = MStorageWrapper.getInstance();
+        assert mStorageWrapper != null : "storage wrapper instance is null";
+        mStorageWrapper.createKeyspaceIfAbsent(this.keyspace.getMetadata().name);
+        MTablesManager pmTablesManager = mStorageWrapper.getMTablesManager(this.keyspace.getMetadata().name);
+        assert pmTablesManager != null : "tables mgr null for keyspace: " + this.keyspace.getMetadata().name;
+        boolean isClusteringKeyAvailable = (this.metadata().clusteringColumns().size() != 0) ? true : false;
+
+
+        mTableMetadata = new PersistentTableMetadata(this.keyspace.getMetadata().name, name, this.metadata().id.asUUID());
+        assert mTableMetadata != null : "mTableMetadata is null";
+        UnmodifiableIterator<ColumnMetadata> iterator = this.metadata.get().partitionKeyColumns().iterator();
+        while (iterator.hasNext())
+        {
+            ColumnMetadata colMetadata = iterator.next();
+            PersistentColumnMetadata columnMetadata;
+            String colName = colMetadata.name.toString();
+            PersistentString columnNameTemp = PersistentString.make(colName);
+            Schema.instance.storePersistentColumnName(colName, columnNameTemp);
+            if (colMetadata.type instanceof MapType)
+            {
+                int dataType = MUtils.getPMDataType(colMetadata.type, false);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp,
+                                                             dataType, false);
+            }
+            else if (colMetadata.type instanceof SetType)
+            {
+                int dataType = MUtils.getPMDataType(colMetadata.type, false);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, false);
+            }
+            else if (colMetadata.type instanceof ListType)
+            {
+                boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                int dataType = MUtils.getPMDataType(colMetadata.type, flag);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, flag);
+            }
+            else
+            {
+                int dataType = MUtils.getPMDataType(colMetadata.type, false);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, false);
+            }
+            assert columnMetadata != null : "column metadata is null.";
+            mTableMetadata.addPartitionKey(columnMetadata);
+        }
+
+        iterator = this.metadata.get().clusteringColumns().iterator();
+        while (iterator.hasNext())
+        {
+            ColumnMetadata colMetadata = iterator.next();
+            PersistentColumnMetadata columnMetadata;
+            String colName = colMetadata.name.toString();
+            PersistentString columnNameTemp = PersistentString.make(colName);
+            Schema.instance.storePersistentColumnName(colName, columnNameTemp);
+            if (colMetadata.type instanceof MapType)
+            {
+                int dataType = MUtils.getPMDataType(colMetadata.type, false);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, false);
+            }
+            else if (colMetadata.type instanceof SetType)
+            {
+                int dataType = MUtils.getPMDataType(colMetadata.type, false);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, false);
+            }
+            else if (colMetadata.type instanceof ListType)
+            {
+                boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                int dataType = MUtils.getPMDataType(colMetadata.type, flag);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, flag);
+            }
+            else
+            {
+                int dataType = MUtils.getPMDataType(colMetadata.type, false);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, false);
+            }
+            assert columnMetadata != null : "column metadata is null.";
+            //mTableMetadata.addClusteringKey(columnMetadata);
+            ((PersistentTableMetadata)mTableMetadata).addClusteringKey(columnMetadata);
+        }
+
+        Iterator colIterator = this.metadata.get().regularAndStaticColumns().iterator();
+        while (colIterator.hasNext())
+        {
+            ColumnMetadata colMetadata = (ColumnMetadata) colIterator.next();
+            MColumnMetadata columnMetadata;
+            String colName = colMetadata.name.toString();
+            PersistentString columnNameTemp = PersistentString.make(colName);
+            Schema.instance.storePersistentColumnName(colName, columnNameTemp);
+            if (colMetadata.type instanceof MapType)
+            {
+                boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                int dataType = MUtils.getPMDataType(colMetadata.type, flag);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, flag);
+            }
+            else if (colMetadata.type instanceof SetType)
+            {
+                boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                int dataType = MUtils.getPMDataType(colMetadata.type, flag);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, flag);
+            }
+            else if (colMetadata.type instanceof ListType)
+            {
+                boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                int dataType = MUtils.getPMDataType(colMetadata.type, flag);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, flag);
+            }
+            else
+            {
+                int dataType = MUtils.getPMDataType(colMetadata.type, false);
+                columnMetadata = new PersistentColumnMetadata(columnNameTemp, dataType, false);
+            }
+            assert columnMetadata != null : "column metadata is null.";
+            ((PersistentTableMetadata)mTableMetadata).addRegularStaticColumn(columnNameTemp, columnMetadata);
+        }
+        boolean isPMTableCreated = pmTablesManager.createMTableIfAbsent(this.metadata().id.asUUID(),
+                isClusteringKeyAvailable, mTableMetadata, metadata.get());
+        if (!isPMTableCreated) {
+            logger.info("PMTable already exists");
+        }
+        // Persistent memory related changes END
+
         // Create Memtable only on online
         Memtable initialMemtable = null;
         if (DatabaseDescriptor.isDaemonInitialized())
@@ -431,6 +568,25 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             Collection<SSTableReader> sstables = SSTableReader.openAll(sstableFiles.list().entrySet(), metadata);
             data.addInitialSSTables(sstables);
         }
+
+        // Persistent memory enabled changes BEGIN
+        UUID tableId = this.metadata.id.asUUID();
+        if(MStorageWrapper.getInstance().doesKeyspaceExist(this.keyspace.getName()))
+        {
+            MTablesManager tablesManager = mStorageWrapper.getMTablesManager(this.keyspace.getName());
+            assert tablesManager != null : "table mgr instance is null";
+            if (tablesManager.doesMTableExist(tableId))
+            {
+                //load pmtable list here
+                MTable mTable = tablesManager.getMTable(tableId);
+                data.addMTable(mTable);
+            }
+        }
+        MHeader mh = new MHeader(metadata().partitionKeyType,
+                                 metadata().comparator.subtypes(),
+                                 new MHeader.ColumnsCollector(this.metadata.get().regularAndStaticColumns()));
+        mTableWriter = new PMTableWriter(mh, mStorageWrapper);
+        // Persistent memory enabled changes END
 
         /**
          * When creating a CFS offline we change the default logic needed by CASSANDRA-8671
@@ -1341,8 +1497,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         long start = System.nanoTime();
         try
         {
-            Memtable mt = data.getMemtableFor(opGroup, commitLogPosition);
-            long timeDelta = mt.put(update, indexer, opGroup);
+            //Memtable mt = data.getMemtableFor(opGroup, commitLogPosition);
+            //long timeDelta = mt.put(update, indexer, opGroup);
+            long timeDelta = 0;
+            //System.out.println("about to put, update's columns are " + update.columns());
+
+            // Persistent memory code by bypass the memtable and write
+            // the data directly to the PMTable
+            mTableWriter.mHeader.update(update.columns());
+            mTableWriter.write(update.unfilteredIterator());
             DecoratedKey key = update.partitionKey();
             invalidateCachedPartition(key);
             metric.samplers.get(Sampler.WRITES).addSample(key.getKey(), key.hashCode(), 1);
@@ -2654,5 +2817,24 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             return null;
 
         return keyspace.getColumnFamilyStore(table.id);
+    }
+
+    //This for now returns entire table, need to make it fine grained later
+    public static class MTableViewFragment
+    {
+        public final Iterable<Memtable> memtables;
+        public  MTable mtable;
+
+        public MTableViewFragment(Iterable<Memtable> memtables,MTable mTable)
+        {
+            this.memtables = memtables;
+            this.mtable = mTable;
+        }
+    }
+
+    public MTableViewFragment selectMTable(Function<View, MTable> filter)
+    {
+        View view = data.getView();
+        return new MTableViewFragment( view.getAllMemtables(), view.mTable);
     }
 }

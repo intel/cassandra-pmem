@@ -20,6 +20,8 @@ package org.apache.cassandra.db.rows;
 import java.io.IOException;
 import java.io.IOError;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.memory.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -90,6 +92,15 @@ public class UnfilteredRowIteratorSerializer
                                                              iterator.stats());
 
         serialize(iterator, header, selection, out, version, rowEstimate);
+
+        // Below method stores the data into PM if enabled
+        // TODO: Try to separate out this whole serialize() path for system tables
+/*        if(DatabaseDescriptor.isMemoryModeEnabled()) {
+            MTableWriter mTableWriter = MTableWriter.getInstance(new MHeader(header.keyType(),
+                                                                             header.clusteringTypes(), header.columns()));
+            mTableWriter.write(iterator);
+        }
+*/
     }
 
     // Should only be used for the on-wire format.
@@ -133,8 +144,9 @@ public class UnfilteredRowIteratorSerializer
         if (rowEstimate >= 0)
             out.writeUnsignedVInt(rowEstimate);
 
-        while (iterator.hasNext())
+        while (iterator.hasNext()) {
             UnfilteredSerializer.serializer.serialize(iterator.next(), header, out, version);
+        }
         UnfilteredSerializer.serializer.writeEndOfPartition(out);
     }
 

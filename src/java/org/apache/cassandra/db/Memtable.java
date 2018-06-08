@@ -26,6 +26,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
 
+import org.apache.cassandra.memory.MTableWriter;
+import org.apache.cassandra.memory.MHeader;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -138,6 +141,8 @@ public class Memtable implements Comparable<Memtable>
     private final ColumnsCollector columnsCollector;
     private final StatsCollector statsCollector = new StatsCollector();
 
+    private final MTableWriter mTableWriter;
+
     // only to be used by init(), to setup the very first memtable for the cfs
     public Memtable(AtomicReference<CommitLogPosition> commitLogLowerBound, ColumnFamilyStore cfs)
     {
@@ -147,6 +152,9 @@ public class Memtable implements Comparable<Memtable>
         this.initialComparator = cfs.metadata().comparator;
         this.cfs.scheduleFlush();
         this.columnsCollector = new ColumnsCollector(cfs.metadata().regularAndStaticColumns());
+        //if(DatabaseDescriptor.isMemoryModeEnabled()) {
+        mTableWriter = null;
+        //}
     }
 
     // ONLY to be used for testing, to create a mock Memtable
@@ -157,6 +165,7 @@ public class Memtable implements Comparable<Memtable>
         this.cfs = null;
         this.allocator = null;
         this.columnsCollector = new ColumnsCollector(metadata.regularAndStaticColumns());
+        mTableWriter = null;
     }
 
     public MemtableAllocator getAllocator()
@@ -260,7 +269,7 @@ public class Memtable implements Comparable<Memtable>
      */
     long put(PartitionUpdate update, UpdateTransaction indexer, OpOrder.Group opGroup)
     {
-        AtomicBTreePartition previous = partitions.get(update.partitionKey());
+        /*AtomicBTreePartition previous = partitions.get(update.partitionKey());
 
         long initialSize = 0;
         if (previous == null)
@@ -286,7 +295,9 @@ public class Memtable implements Comparable<Memtable>
         columnsCollector.update(update.columns());
         statsCollector.update(update.stats());
         currentOperations.addAndGet(update.operationCount());
-        return pair[1];
+        return pair[1];*/
+        mTableWriter.write(update.unfilteredIterator());
+        return 0;
     }
 
     public int partitionCount()
@@ -414,6 +425,8 @@ public class Memtable implements Comparable<Memtable>
         private final PartitionPosition from;
         private final PartitionPosition to;
 
+        private MTableWriter mTableWriter;
+
         FlushRunnable(PartitionPosition from, PartitionPosition to, Directories.DataDirectory flushLocation, LifecycleTransaction txn)
         {
             this(partitions.subMap(from, to), flushLocation, from, to, txn);
@@ -448,6 +461,10 @@ public class Memtable implements Comparable<Memtable>
             else
                 writer = createFlushWriter(txn, cfs.newSSTableDescriptor(getDirectories().getLocationForDisk(flushLocation)), columnsCollector.get(), statsCollector.get());
 
+            // Initialize PMTable writer if PM is enabled
+           /* if(DatabaseDescriptor.isMemoryModeEnabled()) {
+                mTableWriter = MTableWriter.getInstance(new MHeader(cfs.metadata().partitionKeyType, cfs.metadata().comparator.subtypes(), columnsCollector.get()));
+            }*/
         }
 
         protected Directories getDirectories()
@@ -480,7 +497,10 @@ public class Memtable implements Comparable<Memtable>
                 {
                     try (UnfilteredRowIterator iter = partition.unfilteredIterator())
                     {
+                       // if(DatabaseDescriptor.isMemoryModeEnabled() && mTableWriter != null) {
+                       // } else {
                         writer.append(iter);
+                       // }
                     }
                 }
             }
@@ -504,7 +524,6 @@ public class Memtable implements Comparable<Memtable>
         {
             MetadataCollector sstableMetadataCollector = new MetadataCollector(cfs.metadata().comparator)
                     .commitLogIntervals(new IntervalSet<>(commitLogLowerBound.get(), commitLogUpperBound.get()));
-
             return cfs.createSSTableMultiWriter(descriptor,
                                                 toFlush.size(),
                                                 ActiveRepairService.UNREPAIRED_SSTABLE,

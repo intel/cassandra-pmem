@@ -24,6 +24,9 @@ import java.util.Optional;
 
 import com.google.common.collect.Iterables;
 
+import org.apache.cassandra.memory.MTable;
+import org.apache.cassandra.memory.MTableUnfilteredPartitionIterator;
+import org.apache.cassandra.memory.persistent.PMTable;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.filter.*;
@@ -196,7 +199,10 @@ public class PartitionRangeReadCommand extends ReadCommand
 
     protected UnfilteredPartitionIterator queryStorage(final ColumnFamilyStore cfs, ReadExecutionController executionController)
     {
-        ColumnFamilyStore.ViewFragment view = cfs.select(View.selectLive(dataRange().keyRange()));
+       //Persistent memory related changes, read from PMTable instead of sstable
+        return queryMTableStorage(cfs);
+
+        /*ColumnFamilyStore.ViewFragment view = cfs.select(View.selectLive(dataRange().keyRange()));
         Tracing.trace("Executing seq scan across {} sstables for {}", view.sstables.size(), dataRange().keyRange().getString(metadata().partitionKeyType));
 
         // fetch data from current memtable, historical memtables, and SSTables in the correct order.
@@ -212,9 +218,12 @@ public class PartitionRangeReadCommand extends ReadCommand
                 iterators.add(iter);
             }
 
+
+
             SSTableReadsListener readCountUpdater = newReadCountUpdater();
             for (SSTableReader sstable : view.sstables)
             {
+
                 @SuppressWarnings("resource") // We close on exception and on closing the result returned by this method
                 UnfilteredPartitionIterator iter = sstable.getScanner(columnFilter(), dataRange(), readCountUpdater);
                 iterators.add(iter);
@@ -237,14 +246,58 @@ public class PartitionRangeReadCommand extends ReadCommand
             }
 
             throw e;
+        }*/
+    }
+
+    protected UnfilteredPartitionIterator queryMTableStorage(final ColumnFamilyStore cfs)
+    {
+
+        ColumnFamilyStore.MTableViewFragment view = cfs.selectMTable(View.selectTable());
+
+        final List<UnfilteredPartitionIterator> iterators = new ArrayList<>(Iterables.size(view.memtables) +1);
+
+        try
+        {
+            for (Memtable memtable : view.memtables)
+            {
+                @SuppressWarnings("resource") // We close on exception and on closing the result returned by this method
+                Memtable.MemtableUnfilteredPartitionIterator iter = memtable.makePartitionIterator(columnFilter(), dataRange());
+                oldestUnrepairedTombstone = Math.min(oldestUnrepairedTombstone, iter.getMinLocalDeletionTime());
+                iterators.add(iter);
+            }
+
+            MTable mTable = view.mtable;
+            if(mTable != null)
+            {
+                @SuppressWarnings("resource") // We close on exception and on closing the result returned by this method
+                MTableUnfilteredPartitionIterator iter = mTable.makePartitionIterator(columnFilter(), dataRange(), cfs.metadata());
+                iterators.add(iter);
+            }
+            // iterators can be empty for offline tools
+            return iterators.isEmpty() ? EmptyIterators.unfilteredPartition(metadata())
+                                       : checkCacheFilter(UnfilteredPartitionIterators.mergeLazily(iterators, nowInSec()), cfs);
+        }
+        catch (RuntimeException | Error e)
+        {
+            try
+            {
+                FBUtilities.closeAll(iterators);
+            }
+            catch (Exception suppressed)
+            {
+                e.addSuppressed(suppressed);
+            }
+
+            throw e;
         }
     }
+
 
     /**
      * Creates a new {@code SSTableReadsListener} to update the SSTables read counts.
      * @return a new {@code SSTableReadsListener} to update the SSTables read counts.
      */
-    private static SSTableReadsListener newReadCountUpdater()
+    /*private static SSTableReadsListener newReadCountUpdater()
     {
         return new SSTableReadsListener()
                 {
@@ -254,7 +307,7 @@ public class PartitionRangeReadCommand extends ReadCommand
                         sstable.incrementReadCount();
                     }
                 };
-    }
+    }*/
 
     @Override
     protected int oldestUnrepairedTombstone()

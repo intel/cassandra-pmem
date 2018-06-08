@@ -19,15 +19,23 @@ package org.apache.cassandra.db.rows;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Comparator;
 
-import org.apache.cassandra.config.*;
-import org.apache.cassandra.db.*;
-import org.apache.cassandra.io.util.DataOutputPlus;
+//import lib.util.persistent.PersistentCellByteArray;
+import lib.util.persistent.PersistentImmutableByteArray;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.DeletionPurger;
+import org.apache.cassandra.db.LivenessInfo;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.memory.AbstractAllocator;
+import org.apache.cassandra.utils.vint.VIntCoding;
 
 /**
  * A cell is our atomic unit for a single value of a single column.
@@ -54,6 +62,8 @@ public abstract class Cell extends ColumnData
     };
 
     public static final Serializer serializer = new BufferCell.Serializer();
+
+    public static final PMCellWriter cellWriter = new BufferCell.PMCellWriter();
 
     protected Cell(ColumnMetadata column)
     {
@@ -145,6 +155,213 @@ public abstract class Cell extends ColumnData
     // Overrides super type to provide a more precise return type.
     public abstract Cell purge(DeletionPurger purger, int nowInSec);
 
+    public static class PMCellWriter {
+        public final static int IS_DELETED_MASK             = 0x01; // Whether the cell is a tombstone or not.
+        public final static int IS_EXPIRING_MASK            = 0x02; // Whether the cell is expiring.
+        public final static int HAS_EMPTY_VALUE_MASK        = 0x04; // Wether the cell has an empty value. This will be the case for tombstone in particular.
+        public final static int USE_ROW_TIMESTAMP_MASK      = 0x08; // Wether the cell has the same timestamp than the row this is a cell of.
+        public final static int USE_ROW_TTL_MASK            = 0x10; // Wether the cell has the same ttl than the row this is a cell of.
+        EncodingStats stats = EncodingStats.NO_STATS;
+     //   private long minTimestamp = Long.MAX_VALUE;
+        public boolean isLive(int localDeletionTime, int ttl)
+        {
+            int nowInSec = FBUtilities.nowInSeconds();
+            return localDeletionTime == NO_DELETION_TIME || (ttl != NO_TTL && nowInSec < localDeletionTime);
+        }
+
+        // Writes cell data to the memory depending on what is enabled, volatile or persistent
+        //public PersistentImmutableByteArray writeCelltoMemory(Cell cell, ColumnMetadata column, LivenessInfo rowLiveness, PersistentImmutableByteArray existingCell,EncodingStats stats)
+        public byte[] writeCelltoMemory(Cell cell, ColumnMetadata column, LivenessInfo rowLiveness, PersistentImmutableByteArray existingCell,EncodingStats stats)
+        {
+
+            assert cell != null;
+            this.stats = stats;
+            boolean hasValue = cell.value().hasRemaining();
+            boolean isDeleted = cell.isTombstone();
+            boolean isExpiring = cell.isExpiring();
+            boolean useRowTimestamp = !rowLiveness.isEmpty() && cell.timestamp() == rowLiveness.timestamp();
+            boolean useRowTTL = isExpiring && rowLiveness.isExpiring() && cell.ttl() == rowLiveness.ttl() && cell.localDeletionTime() == rowLiveness.localExpirationTime();
+            int flags = 0;
+            if (!hasValue)
+                flags |= HAS_EMPTY_VALUE_MASK;
+            if (isDeleted)
+                flags |= IS_DELETED_MASK;
+            else if (isExpiring)
+                flags |= IS_EXPIRING_MASK;
+            if (useRowTimestamp)
+                flags |= USE_ROW_TIMESTAMP_MASK;
+            if (useRowTTL)
+                flags |= USE_ROW_TTL_MASK;
+
+            int size = getCellPayloadSize(cell, column, rowLiveness);
+            byte[] cellp = null;
+            short cellPathLen = 0;
+            if (column.isComplex())
+            {
+                cell.path().get(0).mark();
+                cellp = new byte[cell.path().get(0).remaining()];
+                cell.path().get(0).get(cellp);
+                cell.path().get(0).reset();
+                cellPathLen = (short) cellp.length;
+            }
+
+            byte[] val = null;
+            if (hasValue)
+            {
+                val = new byte[cell.value().remaining()];
+                cell.value().duplicate().get(val);
+            }
+
+            long updateTimestamp = !useRowTimestamp ? cell.timestamp() : 0;
+            int updateLocalDeletionTime = ((isDeleted || isExpiring) && !useRowTTL) ? cell.localDeletionTime() : Cell.NO_DELETION_TIME;
+            int updateTtl = (isExpiring && !useRowTTL) ? cell.ttl() : Cell.NO_TTL;
+            if(existingCell != null)
+            {
+                ByteBuffer existingCellBB = ByteBuffer.wrap(existingCell.toArray());
+                int existingFlag = existingCellBB.get();
+
+                boolean isDeletedExistingCell = (existingFlag & IS_DELETED_MASK) != 0;
+                boolean isExpiringExistingCell = (existingFlag & IS_EXPIRING_MASK) != 0;
+                boolean useRowTimestampExistingCell = (existingFlag & USE_ROW_TIMESTAMP_MASK) != 0;
+                boolean useRowTTLExistingCell = (existingFlag & USE_ROW_TTL_MASK) != 0;
+
+                long existingTimestamp = 0;
+                if (!useRowTimestampExistingCell)
+                {
+                    existingTimestamp = existingCellBB.getInt();
+                  /*  byte firstByte = existingCellBB.get();
+
+                    //Bail out early if this is one byte, necessary or it fails later
+                    if (firstByte >= 0)
+                    {
+                        existingTimestamp = firstByte;//add timestamp
+                    }
+
+                    else
+                    {
+                        int extraBytes = VIntCoding.numberOfExtraBytesToRead(firstByte);
+
+                        int position = existingCellBB.position();
+                        int extraBits = extraBytes * 8;
+
+                        long retval = existingCellBB.getLong(position);
+                        if (existingCellBB.order() == ByteOrder.LITTLE_ENDIAN)
+                            retval = Long.reverseBytes(retval);
+                        existingCellBB.position(position + extraBytes);
+
+                        // truncate the bytes we read in excess of those we needed
+                        retval >>>= 64 - extraBits;
+                        // remove the non-value bits from the first byte
+                        firstByte &= VIntCoding.firstByteValueMask(extraBytes);
+                        // shift the first byte up to its correct position
+                        existingTimestamp |= (long) firstByte << extraBits;
+                    }*/
+                }
+                  //  existingTimestamp = existingCellBB.getLong();
+                if (updateTimestamp != existingTimestamp)
+                {
+                    if (updateTimestamp < existingTimestamp) return null;
+                    else
+                    {
+                        int existingLocalDeletionTime = Cell.NO_DELETION_TIME;
+                        int existingTtl = Cell.NO_TTL;
+                        if ((isDeletedExistingCell || isExpiringExistingCell) && !useRowTTLExistingCell)
+                            existingLocalDeletionTime = existingCellBB.getInt();
+                        if (isExpiringExistingCell && !useRowTTLExistingCell)
+                            existingTtl = existingCellBB.getInt();
+                        boolean isUpdateLive = isLive(updateLocalDeletionTime, updateTtl);
+                        boolean isExistingLive = isLive(existingLocalDeletionTime, existingTtl);
+                        if (isUpdateLive != isExistingLive)
+                        {
+                            if (isUpdateLive) return null;
+                            else
+                            {
+                                int length = existingCellBB.getInt();
+                                byte[] buf = new byte[length];
+                                existingCellBB.get(buf, 0, length);
+                                int c = ByteBuffer.wrap(buf).compareTo(cell.value());
+                                if (c < 0) return null;
+
+                                if (c == 0)
+                                {
+                                    if (updateLocalDeletionTime < existingLocalDeletionTime) return null;
+                                }
+                            }
+                        }
+                    }
+                }
+
+            }
+
+            // Create immutable persistent buffer
+
+            ByteBuffer bb = ByteBuffer.allocate(size + 4);
+            bb.putInt(size);
+            bb.put((byte) flags);
+
+            Long value = updateTimestamp-stats.minTimestamp;
+
+            bb.putInt(value.intValue());
+
+            if ((isDeleted || isExpiring) && !useRowTTL)
+                bb.putInt(updateLocalDeletionTime);
+            if (isExpiring && !useRowTTL)
+                bb.putInt(updateTtl);
+
+            if (hasValue)
+            {
+                //    column
+                if (column.type.valueLengthIfFixed() < 0)
+                {
+                    int valueLen = val.length;
+                    bb.putInt(valueLen);
+                }
+                bb.put(val);
+            }
+            if(column.isComplex())
+            {
+                bb.putInt(cellPathLen);
+                bb.put(cellp);
+            }
+
+
+            return bb.array();
+
+        }
+        private int getCellPayloadSize(Cell cell, ColumnMetadata column, LivenessInfo rowLiveness)
+        {
+            boolean hasValue = cell.value().hasRemaining();
+            boolean isDeleted = cell.isTombstone();
+            boolean isExpiring = cell.isExpiring();
+         //   boolean useRowTimestamp = !rowLiveness.isEmpty() && cell.timestamp() == rowLiveness.timestamp();
+            boolean useRowTTL = isExpiring && rowLiveness.isExpiring() && cell.ttl() == rowLiveness.ttl() && cell.localDeletionTime() == rowLiveness.localExpirationTime();
+
+
+            int size = 1; //contains flags by default
+            size += Integer.BYTES; //timestamp size
+
+            if ((isDeleted || isExpiring) && !useRowTTL)
+                size += TypeSizes.sizeofUnsignedVInt(cell.localDeletionTime() - stats.minLocalDeletionTime);
+            if (isExpiring && !useRowTTL)
+                size += TypeSizes.sizeofUnsignedVInt(cell.ttl() - stats.minTTL);
+            if (column.isComplex())
+            {
+                int cellPathSize = cell.path().get(0).remaining();
+                size +=Integer.BYTES +cellPathSize;
+            }
+            if (hasValue)
+            {
+                int cellSize = cell.value().remaining();
+                if (column.type.valueLengthIfFixed() < 0)
+                    size += Integer.BYTES;
+                size += cellSize;
+            }
+            return size;
+        }
+
+
+    }
+
     /**
      * The serialization format for cell is:
      *     [ flags ][ timestamp ][ deletion time ][    ttl    ][ path size ][ path ][ value size ][ value ]
@@ -204,11 +421,13 @@ public abstract class Cell extends ColumnData
             if (isExpiring && !useRowTTL)
                 header.writeTTL(cell.ttl(), out);
 
-            if (column.isComplex())
+            if (column.isComplex()) {
                 column.cellPathSerializer().serialize(cell.path(), out);
+            }
 
-            if (hasValue)
+            if (hasValue) {
                 header.getType(column).writeValue(cell.value(), out);
+            }
         }
 
         public Cell deserialize(DataInputPlus in, LivenessInfo rowLiveness, ColumnMetadata column, SerializationHeader header, SerializationHelper helper) throws IOException

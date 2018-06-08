@@ -25,11 +25,14 @@ import com.google.common.base.Functions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.*;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.memory.MTable;
+import org.apache.cassandra.memory.persistent.PMTable;
 import org.apache.cassandra.utils.Interval;
 
 import static com.google.common.base.Predicates.equalTo;
@@ -76,6 +79,11 @@ public class View
     final Map<SSTableReader, SSTableReader> compactingMap;
 
     final SSTableIntervalTree intervalTree;
+    /**
+     * contains reference to table in memory_storage_mode for a column family
+     */
+    public  MTable mTable;
+
 
     View(List<Memtable> liveMemtables, List<Memtable> flushingMemtables, Map<SSTableReader, SSTableReader> sstables, Map<SSTableReader, SSTableReader> compacting, SSTableIntervalTree intervalTree)
     {
@@ -93,6 +101,13 @@ public class View
         this.compactingMap = compacting;
         this.compacting = compactingMap.keySet();
         this.intervalTree = intervalTree;
+    }
+
+    //Add MTable to the View
+    View(List<Memtable> liveMemtables, List<Memtable> flushingMemtables, Map<SSTableReader, SSTableReader> sstables, Map<SSTableReader, SSTableReader> compacting, SSTableIntervalTree intervalTree,MTable mTable)
+    {
+        this(liveMemtables,flushingMemtables, sstables, compacting, intervalTree );
+        this.mTable=mTable;
     }
 
     public Memtable getCurrentMemtable()
@@ -298,7 +313,10 @@ public class View
             {
                 List<Memtable> newLive = ImmutableList.<Memtable>builder().addAll(view.liveMemtables).add(newMemtable).build();
                 assert newLive.size() == view.liveMemtables.size() + 1;
-                return new View(newLive, view.flushingMemtables, view.sstablesMap, view.compactingMap, view.intervalTree);
+                // persistent memory related changes BEGIN
+                return new View(newLive, view.flushingMemtables, view.sstablesMap, view.compactingMap, view.intervalTree, view.mTable);
+                // persistent memory related changes END
+                // return new View(newLive, view.flushingMemtables, view.sstablesMap, view.compactingMap, view.intervalTree);
             }
         };
     }
@@ -317,7 +335,11 @@ public class View
                                                            filter(flushing, not(lessThan(toFlush)))));
                 assert newLive.size() == live.size() - 1;
                 assert newFlushing.size() == flushing.size() + 1;
-                return new View(newLive, newFlushing, view.sstablesMap, view.compactingMap, view.intervalTree);
+                // persistent memory related changes BEGIN
+                return new View(newLive, newFlushing, view.sstablesMap, view.compactingMap, view.intervalTree, view.mTable);
+                // persistent memory related changes END
+                // return new View(newLive, newFlushing, view.sstablesMap, view.compactingMap, view.intervalTree);
+
             }
         };
     }
@@ -333,12 +355,23 @@ public class View
                 assert flushingMemtables.size() == view.flushingMemtables.size() - 1;
 
                 if (flushed == null || Iterables.isEmpty(flushed))
+                {
+                    // persistent memory related changes BEGIN
                     return new View(view.liveMemtables, flushingMemtables, view.sstablesMap,
-                                    view.compactingMap, view.intervalTree);
+                                    view.compactingMap, view.intervalTree, view.mTable);
+                    // persistent memory related changes END
+                    /*return new View(view.liveMemtables, flushingMemtables, view.sstablesMap,
+                                    view.compactingMap, view.intervalTree);*/
+                }
 
                 Map<SSTableReader, SSTableReader> sstableMap = replace(view.sstablesMap, emptySet(), flushed);
+                // persistent memory related changes BEGIN
                 return new View(view.liveMemtables, flushingMemtables, sstableMap, view.compactingMap,
-                                SSTableIntervalTree.build(sstableMap.keySet()));
+                                SSTableIntervalTree.build(sstableMap.keySet()), view.mTable);
+                // persistent memory related changes END
+                /*return new View(view.liveMemtables, flushingMemtables, sstableMap, view.compactingMap,
+                                SSTableIntervalTree.build(sstableMap.keySet()));*/
+
             }
         };
     }
@@ -350,6 +383,23 @@ public class View
             public boolean apply(T t)
             {
                 return t.compareTo(lessThan) < 0;
+            }
+        };
+    }
+
+    public static Function<View, MTable> selectTable()
+    {
+        return (view) -> view.mTable;
+    }
+    // construct a function to add/update MTable
+    static Function<View, View> updateMTable( final MTable mTable)
+    {
+        return new Function<View, View>()
+        {
+            public View apply(View view)
+            {
+               return new View(view.liveMemtables, view.flushingMemtables, view.sstablesMap, view.compactingMap,
+                               view.intervalTree, mTable);
             }
         };
     }

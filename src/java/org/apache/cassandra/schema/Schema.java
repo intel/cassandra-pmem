@@ -19,6 +19,7 @@ package org.apache.cassandra.schema;
 
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
@@ -26,6 +27,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.MapDifference;
 import com.google.common.collect.Sets;
 
+import lib.util.persistent.PersistentString;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.functions.*;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -67,6 +69,8 @@ public final class Schema
     private volatile UUID version;
 
     private final List<SchemaChangeListener> changeListeners = new CopyOnWriteArrayList<>();
+
+    private Map<String, PersistentString> globalPSStore = new ConcurrentHashMap<>();
 
     /**
      * Initialize empty schema object and load the hardcoded system tables
@@ -472,6 +476,29 @@ public final class Schema
                           + "not being fully propagated.  Please wait for schema agreement on table creation.",
                           id);
         throw new UnknownTableException(message, id);
+    }
+
+    /**
+     * Store the PersistentString instance for a given column name string
+     *
+     * @param columnName
+     * @param persistentColumnName
+     */
+    public void storePersistentColumnName(String columnName, PersistentString persistentColumnName)
+    {
+        globalPSStore.putIfAbsent(columnName, persistentColumnName);
+    }
+
+    /**
+     * Looks up the map<column name, PersistentString> and returns the
+     * corresponding PersistentString instance for the given column name
+     *
+     * @param columnName
+     * @return PersistentString object for a given column name
+     */
+    public PersistentString getPersistentColumnName(String columnName)
+    {
+        return globalPSStore.get(columnName);
     }
 
     /* Function helpers */

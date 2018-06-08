@@ -31,6 +31,8 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.WrappedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Serialize/deserialize a single Unfiltered (both on-wire and on-disk).
@@ -92,7 +94,7 @@ import org.apache.cassandra.utils.WrappedException;
  * The serialization of a {@code <cell>} is defined by {@link Cell.Serializer}.
  */
 public class UnfilteredSerializer
-{
+{private static final Logger logger = LoggerFactory.getLogger(UnfilteredSerializer.class);
     public static final UnfilteredSerializer serializer = new UnfilteredSerializer();
 
     /*
@@ -145,7 +147,6 @@ public class UnfilteredSerializer
     {
         int flags = 0;
         int extendedFlags = 0;
-
         boolean isStatic = row.isStatic();
         Columns headerColumns = header.columns(isStatic);
         LivenessInfo pkLiveness = row.primaryKeyLivenessInfo();
@@ -199,30 +200,37 @@ public class UnfilteredSerializer
         {
             serializeRowBody(row, flags, header, out);
         }
+
     }
 
     @Inline
     private void serializeRowBody(Row row, int flags, SerializationHeader header, DataOutputPlus out)
     throws IOException
     {
+
         boolean isStatic = row.isStatic();
 
         Columns headerColumns = header.columns(isStatic);
         LivenessInfo pkLiveness = row.primaryKeyLivenessInfo();
         Row.Deletion deletion = row.deletion();
 
-        if ((flags & HAS_TIMESTAMP) != 0)
+        if ((flags & HAS_TIMESTAMP) != 0) {
             header.writeTimestamp(pkLiveness.timestamp(), out);
+        }
+
         if ((flags & HAS_TTL) != 0)
         {
             header.writeTTL(pkLiveness.ttl(), out);
             header.writeLocalDeletionTime(pkLiveness.localExpirationTime(), out);
         }
-        if ((flags & HAS_DELETION) != 0)
-            header.writeDeletionTime(deletion.time(), out);
 
-        if ((flags & HAS_ALL_COLUMNS) == 0)
+        if ((flags & HAS_DELETION) != 0) {
+            header.writeDeletionTime(deletion.time(), out);
+        }
+
+        if ((flags & HAS_ALL_COLUMNS) == 0) {
             Columns.serializer.serializeSubset(Collections2.transform(row, ColumnData::column), headerColumns, out);
+        }
 
         SearchIterator<ColumnMetadata, ColumnMetadata> si = headerColumns.iterator();
 
@@ -239,10 +247,12 @@ public class UnfilteredSerializer
 
                 try
                 {
-                    if (cd.column.isSimple())
+                    if (cd.column.isSimple()) {
                         Cell.serializer.serialize((Cell) cd, column, out, pkLiveness, header);
-                    else
+                    }
+                    else {
                         writeComplexColumn((ComplexColumnData) cd, column, (flags & HAS_COMPLEX_DELETION) != 0, pkLiveness, header, out);
+                    }
                 }
                 catch (IOException e)
                 {
@@ -262,12 +272,15 @@ public class UnfilteredSerializer
     private void writeComplexColumn(ComplexColumnData data, ColumnMetadata column, boolean hasComplexDeletion, LivenessInfo rowLiveness, SerializationHeader header, DataOutputPlus out)
     throws IOException
     {
-        if (hasComplexDeletion)
+        if (hasComplexDeletion) {
             header.writeDeletionTime(data.complexDeletion(), out);
+        }
 
         out.writeUnsignedVInt(data.cellsCount());
-        for (Cell cell : data)
+
+        for (Cell cell : data) {
             Cell.serializer.serialize(cell, column, out, rowLiveness, header);
+        }
     }
 
     private void serialize(RangeTombstoneMarker marker, SerializationHeader header, DataOutputPlus out, long previousUnfilteredSize, int version)

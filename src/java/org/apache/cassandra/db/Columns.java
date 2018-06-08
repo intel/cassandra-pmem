@@ -531,7 +531,7 @@ public class Columns extends AbstractCollection<ColumnMetadata> implements Colle
 
         // encodes a 1 bit for every *missing* column, on the assumption presence is more common,
         // and because this is consistent with encoding 0 to represent all present
-        private static long encodeBitmap(Collection<ColumnMetadata> columns, Columns superset, int supersetCount)
+        public static long encodeBitmap(Collection<ColumnMetadata> columns, Columns superset, int supersetCount)
         {
             long bitmap = 0L;
             BTreeSearchIterator<ColumnMetadata, ColumnMetadata> iter = superset.iterator();

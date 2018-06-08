@@ -308,7 +308,7 @@ public abstract class UnfilteredPartitionIterators
             // Skip now unused isForThrift boolean
             in.readBoolean();
 
-            return new AbstractUnfilteredPartitionIterator()
+            return  new AbstractUnfilteredPartitionIterator()
             {
                 private UnfilteredRowIterator next;
                 private boolean hasNext;

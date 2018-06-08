@@ -30,12 +30,17 @@ import org.apache.cassandra.db.rows.SerializationHelper;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.memory.MStorageWrapper;
+import org.apache.cassandra.memory.persistent.PMTableWriter;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.memory.MHeader;
+import org.apache.cassandra.memory.MTableWriter;
 
 // TODO convert this to a Builder pattern instead of encouraging M.add directly,
 // which is less-efficient since we have to keep a mutable HashMap around
@@ -377,8 +382,33 @@ public class Mutation implements IMutation
 
             assert size > 0;
             for (Map.Entry<TableId, PartitionUpdate> entry : mutation.modifications.entrySet())
+            {
                 PartitionUpdate.serializer.serialize(entry.getValue(), out, version);
+                // persistent memory related changes BEGIN
+                writeToMemory(entry.getValue());
+                // persistent memory related changes END
+            }
         }
+
+        private void writeToMemory(PartitionUpdate update)
+        {
+            MStorageWrapper mStorageWrapper = MStorageWrapper.getInstance();
+            assert mStorageWrapper != null : "storage wrapper instance is null";
+            try (UnfilteredRowIterator iterator = update.unfilteredIterator())
+            {
+                SerializationHeader header = new SerializationHeader(false,
+                                                                     iterator.metadata(),
+                                                                     iterator.columns(),
+                                                                     iterator.stats());
+
+                PMTableWriter mTableWriter = new PMTableWriter(new MHeader(header.keyType(),
+                                                                           header.clusteringTypes(),
+                                                                           header.columns()),
+                                                               mStorageWrapper);
+                //assert mTableWriter != null : "mTableWriter is null";
+                mTableWriter.write(iterator);
+            }
+         }
 
         public Mutation deserialize(DataInputPlus in, int version, SerializationHelper.Flag flag) throws IOException
         {

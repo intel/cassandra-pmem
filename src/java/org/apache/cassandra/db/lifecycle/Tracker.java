@@ -39,8 +39,10 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.memory.MTable;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.notifications.*;
+import org.apache.cassandra.memory.persistent.PMTable;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.concurrent.OpOrder;
@@ -54,6 +56,7 @@ import static org.apache.cassandra.db.lifecycle.Helpers.*;
 import static org.apache.cassandra.db.lifecycle.View.permitCompacting;
 import static org.apache.cassandra.db.lifecycle.View.updateCompacting;
 import static org.apache.cassandra.db.lifecycle.View.updateLiveSet;
+import static org.apache.cassandra.db.lifecycle.View.updateMTable;
 import static org.apache.cassandra.utils.Throwables.maybeFail;
 import static org.apache.cassandra.utils.Throwables.merge;
 import static org.apache.cassandra.utils.concurrent.Refs.release;
@@ -82,6 +85,7 @@ public class Tracker
         this.view = new AtomicReference<>();
         this.loadsstables = loadsstables;
         this.reset(memtable);
+
     }
 
     public LifecycleTransaction tryModify(SSTableReader sstable, OperationType operationType)
@@ -197,6 +201,12 @@ public class Tracker
         addInitialSSTables(sstables);
         maybeIncrementallyBackup(sstables);
         notifyAdded(sstables);
+    }
+
+    public void addMTable(MTable mTable)
+    {
+
+        apply(updateMTable( mTable));
     }
 
     /** (Re)initializes the tracker, purging all references. */
