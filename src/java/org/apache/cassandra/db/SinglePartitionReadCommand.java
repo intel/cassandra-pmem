@@ -20,6 +20,7 @@ package org.apache.cassandra.db;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -37,6 +38,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.db.lifecycle.*;
 import org.apache.cassandra.db.partitions.*;
+import org.apache.cassandra.db.pmem.storage_engine.PmemTableReadHandler;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.exceptions.RequestExecutionException;
@@ -71,6 +73,7 @@ public class SinglePartitionReadCommand extends ReadCommand
     private final ClusteringIndexFilter clusteringIndexFilter;
 
     private int oldestUnrepairedTombstone = Integer.MAX_VALUE;
+    private final PmemTableReadHandler readHandler;////Using this until read interface for engine is available
 
     @VisibleForTesting
     protected SinglePartitionReadCommand(boolean isDigest,
@@ -88,6 +91,7 @@ public class SinglePartitionReadCommand extends ReadCommand
         assert partitionKey.getPartitioner() == metadata.partitioner;
         this.partitionKey = partitionKey;
         this.clusteringIndexFilter = clusteringIndexFilter;
+        this.readHandler = new PmemTableReadHandler();
     }
 
     /**
@@ -591,6 +595,7 @@ public class SinglePartitionReadCommand extends ReadCommand
 
     private UnfilteredRowIterator queryMemtableAndDiskInternal(ColumnFamilyStore cfs)
     {
+
         /*
          * We have 2 main strategies:
          *   1) We query memtables and sstables simulateneously. This is our most generic strategy and the one we use
@@ -605,13 +610,26 @@ public class SinglePartitionReadCommand extends ReadCommand
         if (clusteringIndexFilter() instanceof ClusteringIndexNamesFilter && !queriesMulticellType())
             return queryMemtableAndSSTablesInTimestampOrder(cfs, (ClusteringIndexNamesFilter)clusteringIndexFilter());
 
-        Tracing.trace("Acquiring sstable references");
+        ClusteringIndexFilter filter = clusteringIndexFilter();
+
+        try //Bypassing SSTable read path until read interface for engine is available
+        {
+            return (readHandler.readSinglePartitionWithFilter(cfs, columnFilter(),filter,partitionKey).get());
+        }
+        catch (Exception e)
+        {
+            logger.error(e.getMessage(), e);
+            throw new RuntimeException(e);
+        }
+
+     /*
+     Tracing.trace("Acquiring sstable references");
         ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
-        List<UnfilteredRowIterator> iterators = new ArrayList<>(Iterables.size(view.memtables) + view.sstables.size());
+
         ClusteringIndexFilter filter = clusteringIndexFilter();
         long minTimestamp = Long.MAX_VALUE;
-
-        try
+        List<UnfilteredRowIterator> iterators = new ArrayList<>(Iterables.size(view.memtables) + view.sstables.size());
+     try
         {
             for (Memtable memtable : view.memtables)
             {
@@ -627,18 +645,18 @@ public class SinglePartitionReadCommand extends ReadCommand
                 iterators.add(iter);
             }
 
-            /*
-             * We can't eliminate full sstables based on the timestamp of what we've already read like
-             * in collectTimeOrderedData, but we still want to eliminate sstable whose maxTimestamp < mostRecentTombstone
-             * we've read. We still rely on the sstable ordering by maxTimestamp since if
-             *   maxTimestamp_s1 > maxTimestamp_s0,
-             * we're guaranteed that s1 cannot have a row tombstone such that
-             *   timestamp(tombstone) > maxTimestamp_s0
-             * since we necessarily have
-             *   timestamp(tombstone) <= maxTimestamp_s1
-             * In other words, iterating in maxTimestamp order allow to do our mostRecentPartitionTombstone elimination
-             * in one pass, and minimize the number of sstables for which we read a partition tombstone.
-             */
+            //
+             // We can't eliminate full sstables based on the timestamp of what we've already read like
+             //in collectTimeOrderedData, but we still want to eliminate sstable whose maxTimestamp < mostRecentTombstone
+             // we've read. We still rely on the sstable ordering by maxTimestamp since if
+             //  maxTimestamp_s1 > maxTimestamp_s0,
+             // we're guaranteed that s1 cannot have a row tombstone such that
+             //   timestamp(tombstone) > maxTimestamp_s0
+            // since we necessarily have
+             //   timestamp(tombstone) <= maxTimestamp_s1
+             // In other words, iterating in maxTimestamp order allow to do our mostRecentPartitionTombstone elimination
+             // in one pass, and minimize the number of sstables for which we read a partition tombstone.
+             //
             Collections.sort(view.sstables, SSTableReader.maxTimestampComparator);
             long mostRecentPartitionTombstone = Long.MIN_VALUE;
             int nonIntersectingSSTables = 0;
@@ -718,7 +736,7 @@ public class SinglePartitionReadCommand extends ReadCommand
                 e.addSuppressed(suppressed);
             }
             throw e;
-        }
+        }*/
     }
 
     private boolean shouldInclude(SSTableReader sstable)
@@ -796,7 +814,16 @@ public class SinglePartitionReadCommand extends ReadCommand
      */
     private UnfilteredRowIterator queryMemtableAndSSTablesInTimestampOrder(ColumnFamilyStore cfs, ClusteringIndexNamesFilter filter)
     {
-        Tracing.trace("Acquiring sstable references");
+        try //Bypassing SSTable read path until read interface for engine is available
+        {
+            return (readHandler.readSinglePartitionWithFilter(cfs, columnFilter(), filter,partitionKey)).get();
+        }
+        catch (Exception e)
+        {
+            logger.error(e.getMessage(), e);
+            throw new RuntimeException(e);
+        }
+        /*Tracing.trace("Acquiring sstable references");
         ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
 
         ImmutableBTreePartition result = null;
@@ -817,7 +844,7 @@ public class SinglePartitionReadCommand extends ReadCommand
             }
         }
 
-        /* add the SSTables on disk */
+        ///add the SSTables on disk
         Collections.sort(view.sstables, SSTableReader.maxTimestampComparator);
         boolean onlyUnrepaired = true;
         // read sorted sstables
@@ -907,7 +934,7 @@ public class SinglePartitionReadCommand extends ReadCommand
             }
         }
 
-        return result.unfilteredIterator(columnFilter(), Slices.ALL, clusteringIndexFilter().isReversed());
+        return result.unfilteredIterator(columnFilter(), Slices.ALL, clusteringIndexFilter().isReversed());*/
     }
 
     private ImmutableBTreePartition add(UnfilteredRowIterator iter, ImmutableBTreePartition result, ClusteringIndexNamesFilter filter, boolean isRepaired)

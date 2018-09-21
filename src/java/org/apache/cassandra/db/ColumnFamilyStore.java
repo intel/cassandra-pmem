@@ -92,6 +92,9 @@ import org.apache.cassandra.utils.memory.MemtableAllocator;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 
+//pmem
+import org.apache.cassandra.db.pmem.storage_engine.PmemTableWriteHandler;
+
 import static org.apache.cassandra.utils.Throwables.maybeFail;
 
 public class ColumnFamilyStore implements ColumnFamilyStoreMBean
@@ -218,7 +221,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     public final TableMetrics metric;
     public volatile long sampleLatencyNanos;
 
-    private final CassandraTableWriteHandler writeHandler;
+   // private final CassandraTableWriteHandler writeHandler;
+    private final PmemTableWriteHandler writeHandler; ////Bypassing SSTable write path until switch option for engine is available
     private final CassandraStreamManager streamManager;
 
     private final TableRepairManager repairManager;
@@ -453,7 +457,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             mbeanName = null;
             oldMBeanName= null;
         }
-        writeHandler = new CassandraTableWriteHandler(this);
+       // writeHandler = new CassandraTableWriteHandler(this);
+        writeHandler = new PmemTableWriteHandler(this);
         streamManager = new CassandraStreamManager(this);
         repairManager = new CassandraTableRepairManager(this);
     }

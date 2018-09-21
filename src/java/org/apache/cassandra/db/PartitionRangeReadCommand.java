@@ -24,6 +24,8 @@ import java.util.List;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Iterables;
 
+import org.apache.cassandra.db.pmem.storage_engine.PmemTableReadHandler;
+import org.apache.cassandra.db.pmem.storage_engine.PmemTableWriteHandler;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.filter.*;
@@ -59,6 +61,7 @@ public class PartitionRangeReadCommand extends ReadCommand
 
     private final DataRange dataRange;
     private int oldestUnrepairedTombstone = Integer.MAX_VALUE;
+    private final PmemTableReadHandler readHandler;
 
     private PartitionRangeReadCommand(boolean isDigest,
                                      int digestVersion,
@@ -72,6 +75,7 @@ public class PartitionRangeReadCommand extends ReadCommand
     {
         super(Kind.PARTITION_RANGE, isDigest, digestVersion, metadata, nowInSec, columnFilter, rowFilter, limits, index);
         this.dataRange = dataRange;
+        this.readHandler = new PmemTableReadHandler();
     }
 
     public static PartitionRangeReadCommand create(TableMetadata metadata,
@@ -254,7 +258,18 @@ public class PartitionRangeReadCommand extends ReadCommand
     @VisibleForTesting
     public UnfilteredPartitionIterator queryStorage(final ColumnFamilyStore cfs, ReadExecutionController executionController)
     {
-        ColumnFamilyStore.ViewFragment view = cfs.select(View.selectLive(dataRange().keyRange()));
+        try //Bypassing SSTable read path until read interface for engine is available
+        {
+            UnfilteredPartitionIterator partitionIterator = readHandler.readPartitionRange(cfs,this);
+            return partitionIterator;
+        }
+        catch (Exception e)
+        {
+            logger.error(e.getMessage(), e);
+            throw new RuntimeException(e);
+        }
+
+       /* ColumnFamilyStore.ViewFragment view = cfs.select(View.selectLive(dataRange().keyRange()));
         Tracing.trace("Executing seq scan across {} sstables for {}", view.sstables.size(), dataRange().keyRange().getString(metadata().partitionKeyType));
 
         // fetch data from current memtable, historical memtables, and SSTables in the correct order.
@@ -295,7 +310,7 @@ public class PartitionRangeReadCommand extends ReadCommand
             }
 
             throw e;
-        }
+        }*/
     }
 
     /**

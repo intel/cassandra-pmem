@@ -35,6 +35,7 @@ import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.pmem.storage_engine.PmemKeyspaceWriteHandler;
 import org.apache.cassandra.db.repair.CassandraKeyspaceRepairManager;
 import org.apache.cassandra.db.view.ViewManager;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
@@ -158,7 +159,7 @@ public class Keyspace
                     t.unloadCf(cfs);
                 t.metric.release();
             }
-            return t;
+          return t;
         }
     }
 
@@ -339,7 +340,8 @@ public class Keyspace
         this.viewManager.reload(false);
 
         this.repairManager = new CassandraKeyspaceRepairManager(this);
-        this.writeHandler = new CassandraKeyspaceWriteHandler(this);
+    //    this.writeHandler = new CassandraKeyspaceWriteHandler(this);
+        this.writeHandler = new PmemKeyspaceWriteHandler(this);
     }
 
     private Keyspace(KeyspaceMetadata metadata)
@@ -349,7 +351,8 @@ public class Keyspace
         this.metric = new KeyspaceMetrics(this);
         this.viewManager = new ViewManager(this);
         this.repairManager = new CassandraKeyspaceRepairManager(this);
-        this.writeHandler = new CassandraKeyspaceWriteHandler(this);
+       // this.writeHandler = new CassandraKeyspaceWriteHandler(this);
+        this.writeHandler = new PmemKeyspaceWriteHandler(this);
     }
 
     public KeyspaceRepairManager getRepairManager()
