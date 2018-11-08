@@ -189,9 +189,18 @@ public class ARTree {
     }
 
     public long get(byte[] radixKey) {
-        if (root.getChild() != null)
-            return search(root.getChild(), radixKey, 0);
+        Node node;
+        if ((node = root.getChild()) != null) {
+            if (node.isLeaf()) {
+                if ((node.getPrefixLength() == radixKey.length) && (node.checkPrefix(radixKey, 0) == radixKey.length))
+                    return ((SimpleLeaf)node).getValue();
+                else 
+                return 0;
+            } else
+                return search(root.getChild(), radixKey, 0);
+        }
         return 0;
+
     }
 
     @SuppressWarnings("unchecked")

@@ -16,7 +16,7 @@ public class Node16 extends InternalNode {
         initType(Node.NODE16_TYPE);
     }
 
-    Node16(Heap heap, MemoryBlock<Raw> mb) {
+    Node16(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 

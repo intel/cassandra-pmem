@@ -21,7 +21,7 @@ public class Node48 extends InternalNode {
         initType(Node.NODE48_TYPE);
     }
 
-    Node48(Heap heap, MemoryBlock<Raw> mb) {
+    Node48(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 

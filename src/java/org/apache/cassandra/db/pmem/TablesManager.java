@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -53,7 +54,8 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.OpOrder;
-import org.jctools.maps.NonBlockingHashMap;
+import java.util.concurrent.ConcurrentHashMap;
+//import org.jctools.maps.NonBlockingHashMap;
 
 // TODO:JEB this is really more of a dispatcher
 public class TablesManager
@@ -66,7 +68,7 @@ public class TablesManager
     private static final int CORES = FBUtilities.getAvailableProcessors();
     private static final Thread[] threads;
     private static final BlockingQueue<FutureTask<?>>[] queues;
-    private static final NonBlockingHashMap<TableId, TableShard[]> tablesMap;
+    private static final Map<TableId, TableShard[]> tablesMap;
     private static final MemoryBlock<Raw> rawMemoryBlock;
     private static int rawMemoryBlockIndex = 0;
     private static final int TABLE_ID_SIZE = 36;
@@ -77,7 +79,7 @@ public class TablesManager
     static final Heap heap;
     static
     {
-        tablesMap = new NonBlockingHashMap<>();
+        tablesMap = new ConcurrentHashMap<>();
         String path = System.getProperty("pmem_path");
         if (path == null)
         {
@@ -196,7 +198,7 @@ public class TablesManager
      */
     public void add(TableId tableId, ColumnFamilyStore cfs)
     {
-        if (tablesMap.contains(tableId))
+        if (tablesMap.containsKey(tableId))
             return;
 
         // All system tables are assigned to shard 0 currently

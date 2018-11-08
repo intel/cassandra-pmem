@@ -17,7 +17,7 @@ public class ComplexLeaf extends Leaf {
         initValue(value);
     }
 
-    ComplexLeaf(Heap heap, MemoryBlock<Raw> mb) {
+    ComplexLeaf(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 

@@ -24,7 +24,7 @@ public class SimpleLeaf extends Leaf {
         initValue(value);
     }
 
-    SimpleLeaf(Heap heap, MemoryBlock<Raw> mb) {
+    SimpleLeaf(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 

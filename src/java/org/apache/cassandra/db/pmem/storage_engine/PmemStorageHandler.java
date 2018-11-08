@@ -18,14 +18,17 @@
 
 package org.apache.cassandra.db.pmem.storage_engine;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import org.apache.cassandra.db.pmem.TablesManager;
-import org.jctools.maps.NonBlockingHashMap;
+//import org.jctools.maps.NonBlockingHashMap;
 
 public class PmemStorageHandler
 {
     public TablesManager tablesManager;
     private static PmemStorageHandler pmemStorageHandler;
-    private static NonBlockingHashMap<String, TablesManager> keyspaceMap;
+    private static Map<String, TablesManager> keyspaceMap;
 
     private PmemStorageHandler()
     {
@@ -37,7 +40,7 @@ public class PmemStorageHandler
         if(pmemStorageHandler == null)
         {
             pmemStorageHandler = new PmemStorageHandler();
-            keyspaceMap = new NonBlockingHashMap<>();
+            keyspaceMap = new ConcurrentHashMap<>();
         }
         return pmemStorageHandler;
     }

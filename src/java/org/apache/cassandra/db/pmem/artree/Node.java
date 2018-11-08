@@ -23,21 +23,21 @@ public abstract class Node {
     static final int MAX_PREFIX_LENGTH = 8;
 
     Heap heap;
-    MemoryBlock<Raw> mb;
+    MemoryBlock<Unbounded> mb;
 
     Node(Heap heap, long size) {
         this.heap = heap;
-        this.mb = this.heap.allocateMemoryBlock(Raw.class, size);
+        this.mb = this.heap.allocateMemoryBlock(Unbounded.class, size);
     }
 
-    Node(Heap heap, MemoryBlock<Raw> mb) {
+    Node(Heap heap, MemoryBlock<Unbounded> mb) {
         this.heap = heap;
         this.mb = mb;
     }
 
     static Node rebuild(Heap heap, long address) {
         if (address == 0) return null;
-        MemoryBlock<Raw> mb = heap.memoryBlockFromAddress(Raw.class, address);
+        MemoryBlock<Unbounded> mb = heap.memoryBlockFromAddress(Unbounded.class, address);
         Node ret = null;
         byte rawType = mb.getByte(NODE_TYPE_OFFSET);
         switch (rawType) {

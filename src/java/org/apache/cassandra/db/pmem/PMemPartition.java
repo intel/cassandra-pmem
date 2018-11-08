@@ -21,6 +21,9 @@ package org.apache.cassandra.db.pmem;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import lib.llpl.Heap;
 import lib.llpl.MemoryBlock;
 
@@ -46,6 +49,7 @@ import org.apache.cassandra.schema.TableMetadata;
 // TODO:JEB prolly rename me
 public class PMemPartition
 {
+    private static final Logger logger = LoggerFactory.getLogger(PMemPartition.class);
     /*
         binary format:
         - offset of partition key - 4 bytes
@@ -64,10 +68,11 @@ public class PMemPartition
     private static final long ROW_MAP_ADDRESS = 0; // long, address
     private static final long STATIC_ROW_ADDRESS = 8; // long, address
     private static final int DELETION_INFO_OFFSET = 16;
-    private static final int DECORATED_KEY_SIZE_OFFSET = 20;
-    private static final int DECORATED_KEY_OFFSET = 24;
+    private static final long NEXT_PARTITION_ADDRESS = 20; //TODO: move this up
+    private static final int DECORATED_KEY_SIZE_OFFSET = 28;
+    private static final int DECORATED_KEY_OFFSET = 32;
 
-    private static final int HEADER_SIZE = 28;
+    private static final int HEADER_SIZE = 36;
 
     /**
      * The block in memory where the high-level data for this partition is stored.
@@ -106,8 +111,41 @@ public class PMemPartition
     public static PMemPartition load(Heap heap, DecoratedKey dkey, Token token, long address)
     {
         MemoryBlock partitionBlock = heap.memoryBlockFromAddress(Raw.class, address);
-        PMemPartition pMemPartition = new PMemPartition(heap, partitionBlock, dkey,token);
-        return pMemPartition;
+        //read DK from MemoryBlock & check for collision
+        int dkSize;
+        dkSize = partitionBlock.getInt(DECORATED_KEY_SIZE_OFFSET);
+        ByteBuffer buf = ByteBuffer.allocate(dkSize);
+        heap.copyToArray(partitionBlock,DECORATED_KEY_OFFSET,buf.array(),0,dkSize);
+        DecoratedKey storedDecoratedKey;
+        storedDecoratedKey = new PmemDecoratedKey(token, partitionBlock, heap, buf);
+        PMemPartition pMemPartition;
+        if(dkey.equals(storedDecoratedKey))
+        {
+            pMemPartition = new PMemPartition(heap, partitionBlock, dkey,token);
+            return pMemPartition;
+        }
+        else
+        {
+            logger.info("Collision detected during reads!!!");
+            MemoryBlock nextBlock = partitionBlock;
+            while(nextBlock.getLong(NEXT_PARTITION_ADDRESS)!= 0)
+            {
+                nextBlock =  heap.memoryBlockFromAddress(Raw.class, nextBlock.getLong(NEXT_PARTITION_ADDRESS));
+                dkSize = nextBlock.getInt(DECORATED_KEY_SIZE_OFFSET);
+                ByteBuffer buf1 = ByteBuffer.allocate(dkSize);
+                heap.copyToArray(nextBlock,DECORATED_KEY_OFFSET,buf1.array(),0,dkSize);
+                storedDecoratedKey = new PmemDecoratedKey(token, nextBlock, heap, buf1);
+                if(dkey.equals(storedDecoratedKey))
+                {
+                    pMemPartition = new PMemPartition(heap, nextBlock, dkey,token);
+                    return pMemPartition;
+                }
+
+            }
+        }
+        return null;
+       // pMemPartition = new PMemPartition(heap, partitionBlock, dkey,token);
+       // return pMemPartition;
     }
 
     public static PMemPartition load(Heap heap,  Token token, long address)
@@ -251,44 +289,138 @@ public class PMemPartition
 
     public static PMemPartition update(PartitionUpdate update, Heap heap, long mbAddr, Transaction tx)
     {
+        PMemPartition[] partition = new PMemPartition[1];
+
         DecoratedKey dkey = update.partitionKey();
         Token token = dkey.getToken();
-        PMemPartition[] partition = new PMemPartition[1];
-        partition[0] = load(heap,dkey,token,mbAddr);
-        MemoryBlock partitionBlock = heap.memoryBlockFromAddress(Raw.class,mbAddr);
-        partitionBlock.addToTransaction(0,partitionBlock.size());
-        long rmARTreeAddr = partitionBlock.getLong(ROW_MAP_ADDRESS);
-        ByteBuffer key = update.partitionKey().getKey();
-        /// ROWS!!!
-        PmemRowMap rm;
-        if (update.hasRows())
+        //create MemoryBlock from address, read DK from it & check for conflicts
+        MemoryBlock<Raw> partitionBlock = heap.memoryBlockFromAddress(Raw.class, mbAddr);
+        int dkSize = partitionBlock.getInt(DECORATED_KEY_SIZE_OFFSET);
+        ByteBuffer buf = ByteBuffer.allocate(dkSize);
+        heap.copyToArray(partitionBlock,DECORATED_KEY_OFFSET,buf.array(),0,dkSize);
+        DecoratedKey storedDecoratedKey = new PmemDecoratedKey(token, partitionBlock, heap, buf);
+
+        if(dkey.equals(storedDecoratedKey))
         {
-            if(rmARTreeAddr == 0)
+            partitionBlock.addToTransaction(0, partitionBlock.size());
+            long rmARTreeAddr = partitionBlock.getLong(ROW_MAP_ADDRESS);
+            ByteBuffer key = dkey.getKey();
+            /// ROWS!!!
+            PmemRowMap rm;
+            if (update.hasRows())
             {
-                rm = PmemRowMap.create(heap, update.metadata(),tx);
-                rmARTreeAddr = rm.getAddress(); //gets address of arTree
+                if (rmARTreeAddr == 0)
+                {
+                    rm = PmemRowMap.create(heap, update.metadata(), tx);
+                    rmARTreeAddr = rm.getAddress(); //gets address of arTree
+                }
+                else
+                {
+                    rm = PmemRowMap.loadFromAddress(heap, rmARTreeAddr, update.metadata());//PmemRowMap.create(heap, update.metadata(),new Transaction());
+                }
+                // build the headers data from this
+                for (Row r : update)
+                    rm.put(r, update, tx);
             }
-            else
-            {
-                rm = PmemRowMap.loadFromAddress(heap, rmARTreeAddr, update.metadata());//PmemRowMap.create(heap, update.metadata(),new Transaction());
-            }
-            // build the headers data from this
-            for (Row r : update)
-                rm.put(r, update, tx);
+
+            final long rowmapAddress = rmARTreeAddr;
+            tx.execute(() ->
+               {
+                   // int keySize = Short.BYTES + key.limit();
+                   int keySize = key.limit();
+                   DeletionTime partitionDelete = update.deletionInfo().getPartitionDeletion();
+                   int partitionDeleteSize = 0;//
+                   // partitionDelete.isLive() ? 0 : (int) DeletionTime.serializer.serializedSize(partitionDelete);
+                   int size = HEADER_SIZE + keySize + partitionDeleteSize;
+                   partitionBlock.setLong(ROW_MAP_ADDRESS, rowmapAddress);//TODO: Need to refactor this
+                   //   mb.setLong(STATIC_ROW_ADDRESS, staticRowAddress);
+                  //load(heap, dkey, token, mbAddr);
+               });
+            partition[0] = new PMemPartition(heap,partitionBlock, dkey,token,update);
+            return partition[0];
         }
-        MemoryBlock<Raw> mb = heap.memoryBlockFromAddress(Raw.class,mbAddr);
-        final long rowmapAddress = rmARTreeAddr;
-        tx.execute(() -> {
-           // int keySize = Short.BYTES + key.limit();
-            int keySize = key.limit();
-            DeletionTime partitionDelete = update.deletionInfo().getPartitionDeletion();
-            int partitionDeleteSize = 0;//
-            // partitionDelete.isLive() ? 0 : (int) DeletionTime.serializer.serializedSize(partitionDelete);
-            int size = HEADER_SIZE + keySize + partitionDeleteSize;
-            mb.setLong(ROW_MAP_ADDRESS, rowmapAddress);
-         //   mb.setLong(STATIC_ROW_ADDRESS, staticRowAddress);
-            partition[0] = load(heap,update.partitionKey(),update.partitionKey().getToken(),mbAddr);//TODO: There is something odd here
-        });
+        else
+        {
+            logger.info("Collision detected during writes!!!");
+            try
+            {
+                MemoryBlock nextBlock = partitionBlock;
+                while(nextBlock.getLong(NEXT_PARTITION_ADDRESS)!= 0) //TODO: This needs some real changes!!!
+                {
+                    nextBlock =  heap.memoryBlockFromAddress(Raw.class, nextBlock.getLong(NEXT_PARTITION_ADDRESS));
+                    dkSize = nextBlock.getInt(DECORATED_KEY_SIZE_OFFSET);
+                    ByteBuffer buf1 = ByteBuffer.allocate(dkSize);
+                    heap.copyToArray(nextBlock,DECORATED_KEY_OFFSET,buf1.array(),0,dkSize);
+                    storedDecoratedKey = new PmemDecoratedKey(token, nextBlock, heap, buf1);
+                    if(dkey.equals(storedDecoratedKey))
+                    {
+                        nextBlock.addToTransaction(0, nextBlock.size());
+                        long rmARTreeAddr = nextBlock.getLong(ROW_MAP_ADDRESS);
+                        ByteBuffer key = dkey.getKey();
+                        /// ROWS!!!
+                        PmemRowMap rm;
+                        if (update.hasRows())
+                        {
+                            if (rmARTreeAddr == 0)
+                            {
+                                rm = PmemRowMap.create(heap, update.metadata(), tx);
+                                rmARTreeAddr = rm.getAddress(); //gets address of arTree
+                            }
+                            else
+                            {
+                                rm = PmemRowMap.loadFromAddress(heap, rmARTreeAddr, update.metadata());//PmemRowMap.create(heap, update.metadata(),new Transaction());
+                            }
+                            // build the headers data from this
+                            for (Row r : update)
+                                rm.put(r, update, tx);
+                        }
+
+                        final long rowmapAddress = rmARTreeAddr;
+                        final MemoryBlock memoryBlock = nextBlock;
+                        tx.execute(() ->
+                                   {
+                                       // int keySize = Short.BYTES + key.limit();
+                                       int keySize = key.limit();
+                                       DeletionTime partitionDelete = update.deletionInfo().getPartitionDeletion();
+                                       int partitionDeleteSize = 0;//
+                                       // partitionDelete.isLive() ? 0 : (int) DeletionTime.serializer.serializedSize(partitionDelete);
+                                       int size = HEADER_SIZE + keySize + partitionDeleteSize;
+                                       memoryBlock.setLong(ROW_MAP_ADDRESS, rowmapAddress);//TODO: Need to refactor this
+                                       //   mb.setLong(STATIC_ROW_ADDRESS, staticRowAddress);
+                                       //load(heap, dkey, token, mbAddr);
+                                   });
+                        partition[0] = new PMemPartition(heap,memoryBlock, dkey,token,update);
+                        return partition[0];
+
+                    }
+
+
+                }
+
+                final MemoryBlock nextBlk = nextBlock;
+                tx.execute(() ->
+                   {
+                       PMemPartition nextPartition = null;
+                       try
+                       {
+                           nextPartition = PMemPartition.create(update, heap, tx);
+                       }
+                       catch (IOException e)
+                       {
+                           e.printStackTrace();
+                       }
+                       nextBlk.addToTransaction(0, nextBlk.size());
+                       nextBlk.setLong(NEXT_PARTITION_ADDRESS, nextPartition.getAddress());
+                       nextPartition.block.flush();
+                   });
+                partition[0] = new PMemPartition(heap,nextBlk, dkey,token,update);
+            }
+            catch(Exception e)
+            {
+                e.printStackTrace();
+            }
+        }
+
         return partition[0];
     }
 

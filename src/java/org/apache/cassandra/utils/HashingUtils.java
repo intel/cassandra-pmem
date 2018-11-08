@@ -28,7 +28,7 @@ import com.google.common.hash.Hashing;
 
 public class HashingUtils
 {
-    public static final HashFunction CURRENT_HASH_FUNCTION = Hashing.md5();
+    public static final HashFunction CURRENT_HASH_FUNCTION = Hashing.murmur3_128();// original md5();
 
     public static MessageDigest newMessageDigest(String algorithm)
     {

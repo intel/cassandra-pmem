@@ -121,7 +121,10 @@ public class TableShard
             PMemPartition pMemPartition = PMemPartition.load(heap, key, new LongToken(token), partionAddr);
             try
             {
-                return pMemPartition.getPmemRowMap(metadata, filter);
+                if (pMemPartition != null)
+                {
+                    return pMemPartition.getPmemRowMap(metadata, filter);
+                }
             }
             catch (IOException e)
             {
@@ -159,14 +162,18 @@ public class TableShard
             PMemPartition pMemPartition = PMemPartition.load(heap, decoratedKey, new LongToken(token), partionAddr);
             try
             {
-                return pMemPartition.getPmemRowMap(metadata, filter, namesFilter);
+                if(pMemPartition != null)
+                {
+                    return pMemPartition.getPmemRowMap(metadata, filter, namesFilter);
+                }
             }
-            catch (IOException e)
+            catch (Exception e)
             {
                 e.printStackTrace();
             }
         }
-        return null;
+       // return null;
+        return EmptyIterators.unfilteredRow(metadata, decoratedKey, false);
     }
 }
 

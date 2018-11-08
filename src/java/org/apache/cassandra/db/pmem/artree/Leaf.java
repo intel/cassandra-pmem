@@ -5,7 +5,7 @@ package org.apache.cassandra.db.pmem.artree;
 import lib.llpl.*;
 
 public abstract class Leaf extends Node {
-    Leaf(Heap heap, MemoryBlock<Raw> mb) {
+    Leaf(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 

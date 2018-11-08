@@ -16,7 +16,7 @@ public class Node256 extends InternalNode {
         initType(Node.NODE256_TYPE);
     }
 
-    Node256(Heap heap, MemoryBlock<Raw> mb) {
+    Node256(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 

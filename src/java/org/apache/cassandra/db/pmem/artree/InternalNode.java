@@ -11,7 +11,7 @@ public abstract class InternalNode extends Node {
         initBlankRadixIndex((byte)0xff);
     }
 
-    InternalNode(Heap heap, MemoryBlock<Raw> mb) {
+    InternalNode(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 

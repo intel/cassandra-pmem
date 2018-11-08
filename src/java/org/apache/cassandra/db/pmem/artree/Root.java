@@ -13,7 +13,7 @@ public final class Root extends Node {
         initType(Node.ROOT_TYPE);
     }
 
-    Root(Heap heap, MemoryBlock<Raw> mb) {
+    Root(Heap heap, MemoryBlock<Unbounded> mb) {
         super(heap, mb);
     }
 
