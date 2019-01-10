@@ -78,6 +78,7 @@
 
 # Imposes an upper bound on hint lifetime below the normal min gc_grace_seconds
 #-Dcassandra.maxHintTTL=max_hint_ttl_in_seconds
+
 #-Dpmem_path=
 #-Dpool_size=
 
@@ -122,7 +123,7 @@
 # resize them at runtime.
 -XX:+UseTLAB
 -XX:+ResizeTLAB
-#-XX:+UseNUMA
+-XX:+UseNUMA
 
 # http://www.evanjones.ca/jvm-mmap-pause.html
 -XX:+PerfDisableSharedMem
@@ -135,7 +136,7 @@
 ### Debug options
 
 # uncomment to enable flight recorder
--XX:+UnlockCommercialFeatures
+#-XX:+UnlockCommercialFeatures
 #-XX:+FlightRecorder
 
 # uncomment to have Cassandra JVM listen for remote debuggers/profilers on port 1414
@@ -164,9 +165,8 @@
 # the same value to avoid stop-the-world GC pauses during resize, and
 # so that we can lock the heap in memory on startup to prevent any
 # of it from being swapped out.
--Xms40G
--Xmx40G
--Xmn20G
+#-Xms4G
+#-Xmx4G
 
 # Young generation size is automatically calculated by cassandra-env
 # based on this formula: min(100 * num_cores, 1/4 * heap size)
@@ -201,18 +201,18 @@
 
 ### CMS Settings
 
-#-XX:+UseParNewGC
-#-XX:+UseConcMarkSweepGC
-#-XX:+CMSParallelRemarkEnabled
-#-XX:SurvivorRatio=8
-#-XX:MaxTenuringThreshold=1
-#-XX:CMSInitiatingOccupancyFraction=75
-#-XX:+UseCMSInitiatingOccupancyOnly
-#-XX:CMSWaitDuration=10000
-#-XX:+CMSParallelInitialMarkEnabled
-#-XX:+CMSEdenChunksRecordAlways
+-XX:+UseParNewGC
+-XX:+UseConcMarkSweepGC
+-XX:+CMSParallelRemarkEnabled
+-XX:SurvivorRatio=8
+-XX:MaxTenuringThreshold=1
+-XX:CMSInitiatingOccupancyFraction=75
+-XX:+UseCMSInitiatingOccupancyOnly
+-XX:CMSWaitDuration=10000
+-XX:+CMSParallelInitialMarkEnabled
+-XX:+CMSEdenChunksRecordAlways
 # some JVMs will fill up their heap when accessed via JMX, see CASSANDRA-6541
-#-XX:+CMSClassUnloadingEnabled
+-XX:+CMSClassUnloadingEnabled
 
 ### G1 Settings (experimental, comment previous section and uncomment section below to enable)
 
@@ -251,15 +251,7 @@
 -XX:+PrintGCApplicationStoppedTime
 -XX:+PrintPromotionFailure
 #-XX:PrintFLSStatistics=1
--Xloggc:/root/cassandra_llpl_engine-persistentmemory/gclogs/gc.log
+#-Xloggc:/var/log/cassandra/gc.log
 -XX:+UseGCLogFileRotation
 -XX:NumberOfGCLogFiles=10
 -XX:GCLogFileSize=10M
--XX:+PreserveFramePointer
--XX:-UseAdaptiveSizePolicy
-#-XX:ParallelGCThreads=9
--agentpath:/lib64/libperfmap.so
--agentpath:/root/SEP/jvmtisym/lin.em64T/libjvmtisym.so
--XX:+Inline
--XX:+UnlockCommercialFeatures
-#-XX:NativeMemoryTracking=detail
