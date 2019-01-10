@@ -22,18 +22,18 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import com.google.common.base.Function;
-import lib.llpl.MemoryBlock;
+import lib.llpl.TransactionalMemoryBlock;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.Memory;
 import org.apache.cassandra.io.util.UnbufferedDataOutputStreamPlus;
 
 public class MemoryBlockDataOutputPlus implements DataOutputPlus
 {
-    private final MemoryBlock block;
+    private final TransactionalMemoryBlock block;
     private final long size;
     private int position;
 
-    public MemoryBlockDataOutputPlus(MemoryBlock block, int initialPosition)
+    public MemoryBlockDataOutputPlus(TransactionalMemoryBlock block, int initialPosition)
     {
         this.block = block;
         size = block.size();

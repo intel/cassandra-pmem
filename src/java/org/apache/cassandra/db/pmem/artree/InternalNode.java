@@ -3,16 +3,27 @@
 package org.apache.cassandra.db.pmem.artree;
 
 import lib.llpl.*;
+import java.util.function.Consumer;
+import java.util.Optional;
 import java.nio.ByteBuffer;
+import java.util.function.Consumer;
 
 public abstract class InternalNode extends Node {
-    InternalNode(Heap heap, long size) {
+    /*InternalNode(TransactionalHeap heap, long size) {
         super(heap, size);
-        initBlankRadixIndex((byte)0xff);
+        //initBlankRadixIndex((byte)0xff);
+    }*/
+
+    InternalNode(TransactionalHeap heap, TransactionalUnboundedMemoryBlock mb) {
+        super(heap, mb);
     }
 
-    InternalNode(Heap heap, MemoryBlock<Unbounded> mb) {
-        super(heap, mb);
+    InternalNode(TransactionalHeap heap, long size, Consumer<Range> initializer) {
+        super(heap, heap.allocateUnboundedMemoryBlock(size, (Range range) -> {
+            range.setByte(BLANK_RADIX_INDEX_OFFSET, (byte)0xff);
+            initializer.accept(range);
+        })
+        );
     }
 
     // Node256 needs to override this to just check if the address for blank radix child is 0
@@ -24,28 +35,28 @@ public abstract class InternalNode extends Node {
         return mb.getByte(BLANK_RADIX_INDEX_OFFSET);
     }
 
-    void initBlankRadixIndex(byte index) {
-        mb.setDurableByte(BLANK_RADIX_INDEX_OFFSET, index);
-    }
-
     void setBlankRadixIndex(byte index) {
-        mb.setTransactionalByte(BLANK_RADIX_INDEX_OFFSET, index);
+        mb.setByte(BLANK_RADIX_INDEX_OFFSET, index);
     }
 
     short getChildrenCount() {
         return mb.getShort(CHILDREN_COUNT_OFFSET);
     }
 
-    void initChildrenCount(short count) {
+    /*void initChildrenCount(short count) {
         mb.setDurableShort(CHILDREN_COUNT_OFFSET, count);
-    }
+    }*/
 
     void setChildrenCount(short count) {
-        mb.setTransactionalShort(CHILDREN_COUNT_OFFSET, count);
+        mb.setShort(CHILDREN_COUNT_OFFSET, count);
     }
 
     void incChildrenCount() {
         setChildrenCount((short)(getChildrenCount() + (short)1));
+    }
+
+    void decChildrenCount() {
+        setChildrenCount((short)(getChildrenCount() - (short)1));
     }
 
     @SuppressWarnings("unchecked")
@@ -77,6 +88,42 @@ public abstract class InternalNode extends Node {
     Node getChildAtIndex(int index) {
         return Node.rebuild(heap, findValueAtIndex(index));
     }
+    
+    @Override
+    void destroy(Consumer<Long> cleaner) {
+        // iterate though children and call destroy
+        Node child;
+        for (int i=0; i<capacity(); i++) {
+            if ((child = getChildAtIndex(i)) != null) {
+                child.destroy(cleaner); 
+                child.free();
+            }
+        }
+    }
+
+    int clearBlankRadixFlag() {
+        int index = (int)getBlankRadixIndex();
+        if (index != -1) mb.setByte(BLANK_RADIX_INDEX_OFFSET, (byte)0xff);
+        return index;
+    }
+
+    Byte findLowestRadix(byte radix, boolean visited) {
+        //integer version
+        int cmp;
+        int lowest;
+        cmp = visited ? radix : Byte.MIN_VALUE - 1;
+        lowest = Byte.MAX_VALUE + 1;
+        byte[] radices = getRadices();
+        // System.out.println("visited is "+visited+", need to find lowest radix between "+cmp+" and "+lowest);
+
+        for (int i = 0; i < radices.length; i++) {
+            // System.out.println("current radix "+radices[i]);
+            if (radices[i] > cmp && radices[i] != (byte)0 && radices[i] < lowest) lowest = radices[i];
+        }
+        if (lowest == Byte.MAX_VALUE + 1) {/*System.out.println("Returning null");*/ return null;} 
+        // System.out.println("returning "+lowest);
+        return (byte)lowest;
+    }
 
     abstract short capacity();
     abstract byte[] getRadices();
@@ -84,8 +131,9 @@ public abstract class InternalNode extends Node {
     abstract int findChildIndex(byte radix);
     abstract long findValueAtIndex(int index);
     abstract void putChildAtIndex(int index, Node child);
-    abstract InternalNode grow();
+    abstract InternalNode grow(Node child, Optional<Byte> radix);
     abstract NodeEntry[] getEntries();
+    abstract void deleteChild(Byte radix);
 
     boolean isLeaf() {
         return false;

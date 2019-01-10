@@ -18,26 +18,27 @@
 
 package org.apache.cassandra.db.pmem;
 
+import java.io.IOError;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import lib.llpl.Heap;
-import lib.llpl.MemoryBlock;
-import lib.llpl.Raw;
+import lib.llpl.TransactionalHeap;
+import lib.llpl.TransactionalMemoryBlock;
+//import lib.llpl.Raw;
 import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ClusteringPrefix;
-import org.apache.cassandra.db.Columns;
+import org.apache.cassandra.db.ClusteringBound;
+import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.ClusteringIndexFilter;
 import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
 import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.pmem.artree.ARTree;
 import org.apache.cassandra.db.rows.BTreeRow;
-import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
@@ -45,74 +46,119 @@ import org.apache.cassandra.db.rows.SerializationHelper;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.AbstractIterator;
-import org.apache.cassandra.utils.FBUtilities;
 import java.util.concurrent.FutureTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements UnfilteredRowIterator//Iterator<Unfiltered>
+public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements UnfilteredRowIterator
 {
-    protected final DataInputPlus in;
     protected final TableMetadata metadata;
-    private final ClusteringPrefix.Deserializer clusteringDeserializer;
-    private final Row.Builder builder;
+   // private final ClusteringPrefix.Deserializer clusteringDeserializer;
+    //private final Row.Builder builder;
     private final ARTree pmemRowTree;
-    private final Heap heap;
+    private final TransactionalHeap heap;
     private final ARTree.EntryIterator pmemRowTreeIterator;
     private DecoratedKey dkey;
     private ColumnFilter filter;
     private ClusteringIndexFilter namesFilter = null;
     public FutureTask<Void> ack;
+    SerializationHeader header;
+    DeletionTime deletionTime = DeletionTime.LIVE;
+    DataRange dataRange;
+
     private static final Logger logger = LoggerFactory.getLogger(PmemRowMapIterator.class);
 
     private PmemRowMapIterator(TableMetadata metadata,
-                               DataInputPlus in, long pmemRowMapTreeAddr, Heap heap, DecoratedKey key, ColumnFilter filter)
+                               DataInputPlus in, long pmemRowMapTreeAddr, TransactionalHeap heap, DecoratedKey key, ColumnFilter filter,ClusteringIndexFilter namesFilter, DeletionTime deletionTime, DataRange dataRange)
     {
         this.metadata = metadata;
-        this.in = in;
         this.heap = heap;
-        SerializationHeader header = SerializationHeader.makeWithoutStats(metadata);
-        this.clusteringDeserializer = new ClusteringPrefix.Deserializer(metadata.comparator, in, header);
-        this.builder = BTreeRow.sortedBuilder();
+        this.header =  SerializationHeader.makeWithoutStats(metadata);
+     //   this.clusteringDeserializer = new ClusteringPrefix.Deserializer(metadata.comparator, in, header);
+       // this.builder = BTreeRow.sortedBuilder();
         this.pmemRowTree = new ARTree(heap,pmemRowMapTreeAddr);
-        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
-        this.dkey = key; //TODO: need to read from persistent
-        this.filter =filter;
-        this.ack = new FutureTask<Void>(()->null);
-    }
 
-    private PmemRowMapIterator(TableMetadata metadata,
-                               DataInputPlus in, long pmemRowMapTreeAddr, Heap heap, DecoratedKey key, ColumnFilter filter,ClusteringIndexFilter namesFilter)
-    {
-        this.metadata = metadata;
-        this.in = in;
-        this.heap = heap;
-        SerializationHeader header = SerializationHeader.makeWithoutStats(metadata);
-        this.clusteringDeserializer = new ClusteringPrefix.Deserializer(metadata.comparator, in, header);
-        this.builder = BTreeRow.sortedBuilder();
-        this.pmemRowTree = new ARTree(heap,pmemRowMapTreeAddr);
-        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
         this.dkey = key; //TODO: need to read from persistent
         this.filter =filter;
         this.namesFilter = namesFilter;
+        this.deletionTime = deletionTime;
         this.ack = new FutureTask<Void>(()->null);
-    }
+        this.dataRange = dataRange;
 
-    public static UnfilteredRowIterator create(TableMetadata tableMetadata, MemoryBlockDataInputPlus inputPlus, long pmemRowMapTreeAddr, Heap heap, DecoratedKey key, ColumnFilter filter, ClusteringIndexFilter namesFilter)
+        if(dataRange != null) //TODO: This needs to be moved to a better place & some serious renaming needed & refactored
+        {
+            ClusteringIndexFilter clusteringIndexFilter = dataRange.clusteringIndexFilter(key);
+            if ( clusteringIndexFilter != null && clusteringIndexFilter.getSlices(metadata) != Slices.ALL) //Read slices
+            {
+                Slices slices = clusteringIndexFilter.getSlices(metadata);
+                if (slices.size() == 1)
+                {
+                    Slice slice = slices.get(0);
+                    boolean includeStart = clusteringIndexFilter.getSlices(metadata).get(0).start().isInclusive();
+                    boolean includeEnd = clusteringIndexFilter.getSlices(metadata).get(0).end().isInclusive();
+                    ClusteringBound start = slice.start() == ClusteringBound.BOTTOM ? null : slice.start();
+                    ClusteringBound end = slice.end() == ClusteringBound.TOP ? null : slice.end();
+                    Clustering clusteringStart;
+                    Clustering clusteringEnd;
+                    ByteBuffer clusteringBufferStart;
+                    ByteBuffer clusteringBufferEnd;
+
+
+                    if ((start != null && start.size() != 0) && (end != null && end.size() != 0))//TODO:
+                    {
+                        clusteringStart = Clustering.make(start.getRawValues());
+                        clusteringBufferStart = Clustering.serializer.serialize(clusteringStart, -1, metadata.comparator.subtypes());
+                        clusteringEnd = Clustering.make(start.getRawValues());
+                        clusteringBufferEnd = Clustering.serializer.serialize(clusteringEnd, -1, metadata.comparator.subtypes());
+                        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator(clusteringBufferStart.array(), includeStart, clusteringBufferEnd.array(), includeEnd);
+                    }
+                    else if ((start != null) && (start.size() != 0))
+                    {
+                        Clustering clustering;
+                        clustering = Clustering.make(start.getRawValues());
+                        clusteringBufferStart = Clustering.serializer.serialize(clustering, -1, metadata.comparator.subtypes());
+                        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator(clusteringBufferStart.array(), includeStart);
+                    }
+                    else
+                        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
+
+                }
+                else //TODO: Need to handle multiple slices
+                    this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
+            }
+            else
+                this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
+        }
+        else
+        {
+            this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
+        }
+   }
+
+    public static UnfilteredRowIterator create(TableMetadata tableMetadata, MemoryBlockDataInputPlus inputPlus, long pmemRowMapTreeAddr, TransactionalHeap heap, DecoratedKey key, ColumnFilter filter, ClusteringIndexFilter namesFilter, DeletionTime deletionTime)
     {
-        return new PmemRowMapIterator(tableMetadata, inputPlus, pmemRowMapTreeAddr, heap, key, filter,namesFilter);
+        return new PmemRowMapIterator(tableMetadata, inputPlus, pmemRowMapTreeAddr, heap, key, filter,namesFilter, deletionTime, null);
     }
     public static UnfilteredRowIterator create(TableMetadata metadata,
-                                               MemoryBlockDataInputPlus in, long pmemRowMapTreeAddr, Heap heap, DecoratedKey key, ColumnFilter filter)//,SerializationHeader header,SerializationHelper helper)
+                                               MemoryBlockDataInputPlus in, long pmemRowMapTreeAddr, TransactionalHeap heap, DecoratedKey key, ColumnFilter filter, DeletionTime deletionTime)//,SerializationHeader header,SerializationHelper helper)
     {
-        return new PmemRowMapIterator(metadata, in, pmemRowMapTreeAddr, heap, key, filter);
+
+        return new PmemRowMapIterator(metadata, in, pmemRowMapTreeAddr, heap, key, filter, null,deletionTime, null);
+    }
+
+    public static UnfilteredRowIterator create(TableMetadata metadata,
+                                               MemoryBlockDataInputPlus in, long pmemRowMapTreeAddr, TransactionalHeap heap, DecoratedKey key, ColumnFilter filter, DeletionTime deletionTime, DataRange dataRange)//,SerializationHeader header,SerializationHelper helper)
+    {
+
+        return new PmemRowMapIterator(metadata, in, pmemRowMapTreeAddr, heap, key, filter, null,deletionTime, dataRange);
     }
 
     protected Unfiltered computeNext() //TODO: This is a roundabout way. Revisit
     {
+        Row.Builder builder = BTreeRow.sortedBuilder();
+
         while (pmemRowTreeIterator.hasNext())
         {
             ARTree.Entry nextEntry = pmemRowTreeIterator.next();
@@ -120,142 +166,62 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
                 return endOfData();
             ByteBuffer clusteringbuffer = ByteBuffer.wrap(nextEntry.getKey());
             Clustering clustering = Clustering.serializer.deserialize(clusteringbuffer, -1, metadata.comparator.subtypes());
-            if((namesFilter != null) && (namesFilter instanceof ClusteringIndexSliceFilter)) //Not the slice we are looking for
+            if ((namesFilter != null) && (namesFilter instanceof ClusteringIndexSliceFilter)) //Not the slice we are looking for
             {
                 boolean flag = ((ClusteringIndexSliceFilter) namesFilter).requestedSlices().selects(clustering);
-                if(flag == false)
+                if (flag == false)
                     continue;
             }
-            SerializationHeader serializationHeader = SerializationHeader.makeWithoutStats(metadata);
-          //  Columns headerColumns = serializationHeader.columns(false);
-            SerializationHelper helper = new SerializationHelper(metadata, -1, SerializationHelper.Flag.LOCAL, filter);
-            long timestamp = FBUtilities.nowInSeconds(); //TODO: Hope this works for now.FIX THIS
-            int ttl = LivenessInfo.NO_TTL;
-            int localDeletionTime = LivenessInfo.NO_EXPIRATION_TIME;
-            LivenessInfo rowLiveness = LivenessInfo.withExpirationTime(timestamp, ttl, localDeletionTime);
-            Row.Builder builder = BTreeRow.sortedBuilder();
-            builder.newRow(clustering);
-            Columns regulars = null;
-            MemoryBlock cellMemoryRegion = heap.memoryBlockFromAddress(Raw.class, nextEntry.getValue());
-            MemoryBlockDataInputPlus memoryBlockDataInputPlus = new MemoryBlockDataInputPlus(cellMemoryRegion, heap); //TODO: Pass the heap as parameter for now until memoryblock.copyfromArray is sorted out
-            try
-            {
-                regulars = Columns.serializer.deserializeSubset(filter.fetchedColumns().regulars, memoryBlockDataInputPlus);
-            }
-            catch (IOException e)
-            {
-                logger.error(e.getMessage(), e);//TODO: Refine exception handling
-                e.printStackTrace();
-            }
-            if((namesFilter != null) && (namesFilter instanceof ClusteringIndexNamesFilter) && (((ClusteringIndexNamesFilter)namesFilter).requestedRows().first().size() >0))//Filter on few columns
-            {
-                if (namesFilter.selects(clustering))
-                {
-                    try
-                    {
-                        for (ColumnMetadata column : regulars)
-                        {
-                            if (filter.queriedColumns().contains(column))
-                            {
 
-                                if (column.isSimple())
-                                    readSimpleColumn(column, memoryBlockDataInputPlus, serializationHeader, helper, builder, rowLiveness);
-                                else
-                                    readComplexColumn(column, memoryBlockDataInputPlus, serializationHeader, helper, false, builder, rowLiveness); //TODO: address hasComplexDeletion
-                            }
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        logger.error(e.getMessage(), e);//TODO: Refine exception handling
-                        e.printStackTrace();
-                    }
+            SerializationHeader serializationHeader ;
+            SerializationHelper helper = new SerializationHelper(metadata, -1, SerializationHelper.Flag.LOCAL);//TODO: Check if version needs to be set
+            TransactionalMemoryBlock cellMemoryBlock = heap.memoryBlockFromHandle(nextEntry.getValue());
+            MemoryBlockDataInputPlus memoryBlockDataInputPlus = new MemoryBlockDataInputPlus(cellMemoryBlock, heap);
+
+            int flags = cellMemoryBlock.getByte(0);
+            if((TablesManager.tablesMetaDataMap.size() > 0) && (TablesManager.tablesMetaDataMap.get(metadata.id).size() > 1))
+            {
+                if (PmemRowSerializer.isTableAltered(flags))
+                {
+                    //byte versionSize = cellMemoryBlock.getByte(1);
+                    int version = cellMemoryBlock.getByte(2);
+                    serializationHeader = TablesManager.tablesMetaDataMap.get(metadata.id).get(version-1);
                 }
                 else
                 {
-                    continue;
+                    serializationHeader = TablesManager.tablesMetaDataMap.get(metadata.id).get(0);
                 }
             }
             else
             {
-                for (ColumnMetadata column : regulars)
+                    serializationHeader = new SerializationHeader(false,
+                                                              metadata,
+                                                              metadata.regularAndStaticColumns(),
+                                                              EncodingStats.NO_STATS);
+            }
+            try
+            {
+                builder.newRow(clustering);
+
+                Unfiltered unfiltered = PmemRowSerializer.serializer.deserialize(memoryBlockDataInputPlus, serializationHeader, helper, builder);
+                ack.run();
+                if((namesFilter != null) && (namesFilter instanceof ClusteringIndexNamesFilter) && (((ClusteringIndexNamesFilter)namesFilter).requestedRows().first().size() >0))
                 {
-                    if (column.isSimple())
-                        readSimpleColumn(column, memoryBlockDataInputPlus, serializationHeader, helper, builder, rowLiveness);
+                    if (namesFilter.selects(clustering))
+                    {
+                        return unfiltered;
+                    }
                     else
-                        readComplexColumn(column, memoryBlockDataInputPlus, serializationHeader, helper, false, builder, rowLiveness); //TODO: address hasComplexDeletion
+                        continue;
                 }
+                return unfiltered == null ? endOfData() : unfiltered;
             }
-            return builder.build();
+            catch (IOException e)
+            {
+                throw new IOError(e);
+            }
         }
-        ack.run();
         return endOfData();
-    }
-
-    private void readComplexColumn(ColumnMetadata column, DataInputPlus in, SerializationHeader header, SerializationHelper helper, boolean hasComplexDeletion, Row.Builder builder, LivenessInfo rowLiveness)
-    {
-        try
-        {
-            if (helper.includes(column))
-            {
-                helper.startOfComplexColumn(column);
-                if (hasComplexDeletion)
-                {
-                    DeletionTime complexDeletion = header.readDeletionTime(in);
-                    if (!helper.isDroppedComplexDeletion(complexDeletion))
-                        builder.addComplexDeletion(column, complexDeletion);
-                }
-                int count = (int) in.readUnsignedVInt();
-                while (--count >= 0)
-                {
-                    Cell cell = Cell.serializer.deserialize(in, rowLiveness, column, header, helper);
-                    if (helper.includes(cell, rowLiveness) && !helper.isDropped(cell, true))
-                        builder.addCell(cell);
-                }
-                helper.endOfComplexColumn();
-            }
-            else
-            {
-                skipComplexColumn(in, column, header, hasComplexDeletion);
-            }
-        }
-        catch(IOException e)
-        {
-            logger.error(e.getMessage(), e);//TODO: Refine exception handling
-            e.printStackTrace();
-        }
-    }
-
-    private void readSimpleColumn(ColumnMetadata column, DataInputPlus in, SerializationHeader header, SerializationHelper helper, Row.Builder builder, LivenessInfo rowLiveness)
-    {
-        try
-        {
-            if (helper.includes(column))
-            {
-                Cell cell = Cell.serializer.deserialize(in, rowLiveness, column, header, helper);
-                if (helper.includes(cell, rowLiveness) && !helper.isDropped(cell, false))
-                    builder.addCell(cell);
-            }
-            else
-            {
-                Cell.serializer.skip(in, column, header);
-            }
-        }
-        catch(IOException e)
-        {
-            logger.error(e.getMessage(), e);//TODO: Refine exception handling
-            e.printStackTrace();
-        }
-    }
-
-    private void skipComplexColumn(DataInputPlus in, ColumnMetadata column, SerializationHeader header, boolean hasComplexDeletion)
-    throws IOException
-    {
-        if (hasComplexDeletion)
-            header.skipDeletionTime(in);
-        int count = (int) in.readUnsignedVInt();
-        while (--count >= 0)
-            Cell.serializer.skip(in, column, header);
     }
 
     public TableMetadata metadata()
@@ -280,12 +246,13 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
 
     public Row staticRow()
     {
+
         return Rows.EMPTY_STATIC_ROW;
     }
 
     public DeletionTime partitionLevelDeletion()
     {
-        return DeletionTime.LIVE;
+        return this.deletionTime;
     }
 
     public EncodingStats stats()

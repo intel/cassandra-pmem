@@ -244,6 +244,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     {
         // metadata object has been mutated directly. make all the members jibe with new settings.
 
+
         // only update these runtime-modifiable settings if they have not been modified.
         if (!minCompactionThreshold.isModified())
             for (ColumnFamilyStore cfs : concatWithIndexes())
@@ -264,7 +265,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         // If the CF comparator has changed, we need to change the memtable,
         // because the old one still aliases the previous comparator.
         if (data.getView().getCurrentMemtable().initialComparator != metadata().comparator)
+        {
             switchMemtable();
+            writeHandler.alterTable(metadata());
+        }
     }
 
     void scheduleFlush()
@@ -1700,6 +1704,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public CompactionManager.AllSSTableOpStatus garbageCollect(TombstoneOption tombstoneOption, int jobs) throws ExecutionException, InterruptedException
     {
+        logger.debug("calling garbagecollect in pmemtablewritehandler!");
+        writeHandler.gc(); 
         return CompactionManager.instance.performGarbageCollection(this, tombstoneOption, jobs);
     }
 

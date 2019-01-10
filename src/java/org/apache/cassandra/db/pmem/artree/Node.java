@@ -3,6 +3,7 @@
 package org.apache.cassandra.db.pmem.artree;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.function.Consumer;
 import lib.llpl.*;
 
 public abstract class Node {
@@ -22,22 +23,22 @@ public abstract class Node {
     protected static final long COMPRESSED_PATH_OFFSET = 8L;
     static final int MAX_PREFIX_LENGTH = 8;
 
-    Heap heap;
-    MemoryBlock<Unbounded> mb;
+    TransactionalHeap heap;
+    TransactionalUnboundedMemoryBlock mb;
 
-    Node(Heap heap, long size) {
+    Node(TransactionalHeap heap, long size) {
         this.heap = heap;
-        this.mb = this.heap.allocateMemoryBlock(Unbounded.class, size);
+        this.mb = this.heap.allocateUnboundedMemoryBlock(size);
     }
 
-    Node(Heap heap, MemoryBlock<Unbounded> mb) {
+    Node(TransactionalHeap heap, TransactionalUnboundedMemoryBlock mb) {
         this.heap = heap;
         this.mb = mb;
     }
 
-    static Node rebuild(Heap heap, long address) {
-        if (address == 0) return null;
-        MemoryBlock<Unbounded> mb = heap.memoryBlockFromAddress(Unbounded.class, address);
+    static Node rebuild(TransactionalHeap heap, long handle) {
+        if (handle == 0) return null;
+        TransactionalUnboundedMemoryBlock mb = heap.unboundedMemoryBlockFromHandle(handle);
         Node ret = null;
         byte rawType = mb.getByte(NODE_TYPE_OFFSET);
         switch (rawType) {
@@ -54,11 +55,11 @@ public abstract class Node {
     }
 
     void free() {
-        this.heap.freeMemoryBlock(mb);
+        mb.free();
     }
 
     long address() {
-        return mb.address();
+        return mb.handle();
     }
 
     byte getType() {
@@ -66,37 +67,33 @@ public abstract class Node {
     }
 
     void initType(byte type) {
-        mb.setDurableByte(NODE_TYPE_OFFSET, type);
+        mb.setByte(NODE_TYPE_OFFSET, type);
     }
 
     void setType(byte type) {
-        mb.setTransactionalByte(NODE_TYPE_OFFSET, type);
+        mb.setByte(NODE_TYPE_OFFSET, type);
     }
 
     int getPrefixLength() {
         return mb.getInt(PREFIX_LENGTH_OFFSET);
     }
 
-    void initPrefixLength(int length) {
-        mb.setDurableInt(PREFIX_LENGTH_OFFSET, length);
-    }
-
     void setPrefixLength(int length) {
-        mb.setTransactionalInt(PREFIX_LENGTH_OFFSET, length);
+        mb.setInt(PREFIX_LENGTH_OFFSET, length);
     }
 
     byte[] getPrefix() {
         byte[] prefix = new byte[getPrefixLength()];
-        heap.copyToArray(mb, COMPRESSED_PATH_OFFSET, prefix, 0, prefix.length);
+        mb.copyToArray(COMPRESSED_PATH_OFFSET, prefix, 0, prefix.length);
         return prefix;
     }
 
     void initPrefix(byte[] prefix) {
        // if (prefix == null) mb.setDurableLong(COMPRESSED_PATH_OFFSET, 0);//TODO: Remove after analysis
         if (prefix.length <= 8) {
-            //MemoryBlock.durableCopyFromArray(prefix, 0, mb.address() + COMPRESSED_PATH_OFFSET, prefix.length);//TODO: Remove after analysis
-            heap.copyFromArray(prefix, 0, mb, COMPRESSED_PATH_OFFSET, prefix.length);
-            mb.flush(COMPRESSED_PATH_OFFSET, prefix.length);
+            //MemoryBlock.durableCopyFromArray(prefix, 0, mb.handle() + COMPRESSED_PATH_OFFSET, prefix.length);//TODO: Remove after analysis
+            mb.copyFromArray(prefix, 0, COMPRESSED_PATH_OFFSET, prefix.length);
+            //mb.flush(COMPRESSED_PATH_OFFSET, prefix.length);
         } else {
             //mb.setDurableLong(COMPRESSED_PATH_OFFSET, prefix.length);
             throw new IllegalArgumentException("Prefix more than 8 bytes");
@@ -106,7 +103,7 @@ public abstract class Node {
     void setPrefix(byte[] prefix) {
        // if (prefix == null) mb.setTransactionalLong(COMPRESSED_PATH_OFFSET, 0);//TODO: Remove after analysis
         if (prefix.length <= 8) {
-            mb.transactionalCopyFromArray(prefix, 0, COMPRESSED_PATH_OFFSET, prefix.length);
+            mb.copyFromArray(prefix, 0, COMPRESSED_PATH_OFFSET, prefix.length);
             //heap.copyFromArray(prefix, 0, mb, COMPRESSED_PATH_OFFSET, prefix.length);
         } else {
             //mb.setTransactionalLong(COMPRESSED_PATH_OFFSET, prefix.length);
@@ -147,6 +144,8 @@ public abstract class Node {
         return sb.toString();
         //return new String(prefix);
     }
+
+    abstract void destroy(Consumer<Long> cleaner); 
 
     void print(int depth) {
         StringBuilder start = new StringBuilder();

@@ -22,7 +22,7 @@ import java.io.IOException;
 
 import com.google.common.primitives.Longs;
 
-import lib.llpl.Heap;
+import lib.llpl.TransactionalHeap;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.filter.ColumnFilter;
@@ -33,17 +33,17 @@ import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.schema.TableMetadata;
 
-public class PMemPartitionIterator extends AbstractUnfilteredPartitionIterator
+public class PmemPartitionIterator extends AbstractUnfilteredPartitionIterator
 {
 
     private final TableMetadata tableMetadata;
     private ARTree.EntryIterator pmemPartitionIterator;
     private DecoratedKey dkey;
-    private Heap heap;
+    private TransactionalHeap heap;
     private ColumnFilter columnFilter;
     private DataRange dataRange;
 
-    public PMemPartitionIterator(TableMetadata tableMetadata, ARTree.EntryIterator entryIterator, Heap heap, ColumnFilter filter, DataRange dataRange)
+    public PmemPartitionIterator(TableMetadata tableMetadata, ARTree.EntryIterator entryIterator, TransactionalHeap heap, ColumnFilter filter, DataRange dataRange)
     {
         this.tableMetadata = tableMetadata;
         this.heap = heap;
@@ -67,7 +67,9 @@ public class PMemPartitionIterator extends AbstractUnfilteredPartitionIterator
     public boolean hasNext()
     {
         if(pmemPartitionIterator.hasNext())
+        {
             return true;
+        }
         return false;
     }
 
@@ -81,10 +83,11 @@ public class PMemPartitionIterator extends AbstractUnfilteredPartitionIterator
     {
         ARTree.Entry nextEntry = pmemPartitionIterator.next();
         Token token = new Murmur3Partitioner.LongToken(Longs.fromByteArray(nextEntry.getKey()));
-        PMemPartition pMemPartition = PMemPartition.load(heap,token,nextEntry.getValue());
+        PmemPartition pMemPartition = PmemPartition.load(heap,token,nextEntry.getValue());
         try
         {
-            return pMemPartition.getPmemRowMap(tableMetadata, columnFilter);
+            if(pMemPartition != null)
+                return pMemPartition.getPmemRowMap(tableMetadata, columnFilter, pMemPartition.getPartitionDelete(), dataRange);
         }
         catch (IOException e)
         {

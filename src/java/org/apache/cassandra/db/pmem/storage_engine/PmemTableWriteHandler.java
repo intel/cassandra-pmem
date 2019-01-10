@@ -27,14 +27,18 @@ import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.pmem.TablesManager;
 import org.apache.cassandra.db.pmem.storage_engine.PmemWriteContext;
 import org.apache.cassandra.index.transactions.UpdateTransaction;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tracing.Tracing;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class PmemTableWriteHandler implements TableWriteHandler
 {
     private final ColumnFamilyStore cfs;
     TablesManager tablesManager = null;
+    private static final Logger logger = LoggerFactory.getLogger(PmemTableWriteHandler.class);
 
-    public PmemTableWriteHandler(ColumnFamilyStore cfs)
+    public PmemTableWriteHandler(ColumnFamilyStore cfs)//TODO: Handle exception case where pmem not avaialble
     {
         this.cfs = cfs;
         tablesManager = PmemStorageHandler.getInstance().getTablesManager(cfs.keyspace.getName());
@@ -63,5 +67,17 @@ public class PmemTableWriteHandler implements TableWriteHandler
         {
             e.printStackTrace();
         }
+    }
+
+    public void gc() {
+        System.out.println("garbace collecting pmem");
+        logger.debug("garbace collecting pmem");
+        Tracing.trace("garbace collecting pmem");
+        tablesManager.garbageCollect(cfs);
+    }
+
+    public void alterTable(TableMetadata metadata)
+    {
+        tablesManager.updateMetaData(metadata);
     }
 }

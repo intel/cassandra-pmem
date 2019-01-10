@@ -33,29 +33,40 @@ import java.util.concurrent.ExecutionException;
 import com.google.common.util.concurrent.Futures;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import lib.llpl.Heap;
-import lib.llpl.MemoryBlock;
-import lib.llpl.Raw;
+import lib.llpl.TransactionalHeap;
+import lib.llpl.TransactionalMemoryBlock;
 import lib.llpl.Transaction;
+import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.EmptyIterators;
 import org.apache.cassandra.db.PartitionRangeReadCommand;
+import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.filter.ClusteringIndexFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
+import org.apache.cassandra.db.pmem.linkedlist.PMemLLNode;
+import org.apache.cassandra.db.pmem.linkedlist.PMemLinkedList;
+import org.apache.cassandra.db.pmem.linkedlist.PMemSerializationHeaderNode;
+import org.apache.cassandra.db.pmem.linkedlist.PMemTableNode;
+import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.index.transactions.UpdateTransaction;
+import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import java.util.concurrent.ConcurrentHashMap;
-//import org.jctools.maps.NonBlockingHashMap;
+import org.apache.cassandra.db.pmem.artree.ARTree;
 
 // TODO:JEB this is really more of a dispatcher
 public class TablesManager
@@ -69,17 +80,21 @@ public class TablesManager
     private static final Thread[] threads;
     private static final BlockingQueue<FutureTask<?>>[] queues;
     private static final Map<TableId, TableShard[]> tablesMap;
-    private static final MemoryBlock<Raw> rawMemoryBlock;
+    static final Map<TableId, List<SerializationHeader>> tablesMetaDataMap;
+    private static final TransactionalMemoryBlock rootMemoryBlock;
+    private static final TransactionalMemoryBlock rawMemoryBlock;
+    private static final TransactionalMemoryBlock sHeaderMemoryBlock;
     private static int rawMemoryBlockIndex = 0;
     private static final int TABLE_ID_SIZE = 36;
     private static final int TABLE_SHARD_KEY_SIZE = 24;
     private static final int TABLE_SHARD_DATAOFFSET = Integer.BYTES;//First 8 bytes contains # of table shards, offset by this while writing the ARTree addresses
 
     // TODO:JEB need to have a map of heaps, one entry per each dimm/namespace/etc ....
-    static final Heap heap;
+    static final TransactionalHeap heap;
     static
     {
         tablesMap = new ConcurrentHashMap<>();
+        tablesMetaDataMap = new ConcurrentHashMap<>();
         String path = System.getProperty("pmem_path");
         if (path == null)
         {
@@ -96,25 +111,43 @@ public class TablesManager
             logger.error("Failed to open pool. System property \"pool_size\" in \"conf/jvm.options\" is invalid!");
             System.exit(1);
         }
-        heap = Heap.getHeap(path, size);
+        heap = TransactionalHeap.getHeap(path, size);
         if (heap.getRoot() == 0)
         {
             // if there's no root set, then this is a brand new heap. thus we need to give it a new root.
             // that root is the "base address" of the map in which we'll store references to all the trees.
-            rawMemoryBlock = heap.allocateMemoryBlock(Raw.class,12288 );//64 tables for now*24 for key*8 for value which is address to tableshard[]
-            heap.setRoot(rawMemoryBlock.address());
+            rootMemoryBlock = heap.allocateMemoryBlock(16);//8 bytes for address of tablesmap, 8 for serializationheader map
+            heap.setRoot(rootMemoryBlock.handle());
+            rawMemoryBlock = heap.allocateMemoryBlock(12288);//64 tables for now*24 for key*8 for value which is address to tableshard[]
+            rootMemoryBlock.setLong(0, rawMemoryBlock.handle());
+            sHeaderMemoryBlock = heap.allocateMemoryBlock(8);//save the address of the head node for the metadata linked list
+            rootMemoryBlock.setLong(8, sHeaderMemoryBlock.handle());
+
+
         }
         else
         {
-            rawMemoryBlock = heap.memoryBlockFromAddress(Raw.class, heap.getRoot());
+            rootMemoryBlock = heap.memoryBlockFromHandle(heap.getRoot());
+            long mbAddr = rootMemoryBlock.getLong(0);
+            rawMemoryBlock = heap.memoryBlockFromHandle(mbAddr);
+            mbAddr = rootMemoryBlock.getLong(8);
+            sHeaderMemoryBlock =  heap.memoryBlockFromHandle(mbAddr);
             if(tablesMap.size() == 0)
             {
                 reloadTablesMap(rawMemoryBlock);
             }
+            /*if(tablesMetaDataMap.size() == 0)
+            {
+                reloadTablesMetadataMap(sHeaderMemoryBlock);
+            }*/
         }
+        // Register Allocation classes for the artree. need heap instance
+        ARTree.registerAllocationClasses(heap);
+        // Register row allocation class
+        heap.registerAllocationSize(120, false);
+
         threads = new Thread[CORES];
         queues = new ArrayBlockingQueue[CORES];
-
         for (int i = 0; i < threads.length; i++)
         {
             final BlockingQueue queue = new ArrayBlockingQueue(1024);
@@ -135,10 +168,61 @@ public class TablesManager
         }
     }
 
+    private void reloadTablesMetadataMap(PMemLLNode tableNode, TableMetadata metadata)
+    {
+        long sHeaderValueAddr;
+        long nextSHeaderBlockAddr = ((PMemTableNode)tableNode).getValue();
+        tablesMetaDataMap.put(metadata.id, new ArrayList<SerializationHeader>());
+
+
+        do
+        {
+            PMemSerializationHeaderNode headerNode = PMemSerializationHeaderNode.reload(heap, nextSHeaderBlockAddr);//heap.memoryBlockFromAddress(Raw.class, nextSHeaderBlockAddr);
+            sHeaderValueAddr = headerNode.getValue();
+            TransactionalMemoryBlock sHeaderValueBlock = heap.memoryBlockFromHandle(sHeaderValueAddr);
+            int position= 0;
+
+            DataInputPlus dib = new MemoryBlockDataInputPlus(sHeaderValueBlock, heap, position);
+            try
+            {
+                SerializationHeader.Component component = SerializationHeader.serializer.deserialize(BigFormat.latestVersion, dib);
+                TableMetadata.Builder tableMetadataBuilder = TableMetadata.builder(metadata.keyspace,metadata.name,metadata.id);
+                component.getStaticColumns().entrySet().stream()
+                      .forEach(entry -> {
+                          ColumnIdentifier ident = ColumnIdentifier.getInterned(UTF8Type.instance.getString(entry.getKey()), true);
+                          tableMetadataBuilder.addStaticColumn(ident, entry.getValue());
+                      });
+                component.getRegularColumns().entrySet().stream()
+                      .forEach(entry -> {
+                          ColumnIdentifier ident = ColumnIdentifier.getInterned(UTF8Type.instance.getString(entry.getKey()), true);
+                          tableMetadataBuilder.addRegularColumn(ident, entry.getValue());
+                      });
+                for (ColumnMetadata columnMetadata : metadata.partitionKeyColumns())
+                    tableMetadataBuilder.addPartitionKeyColumn(columnMetadata.name, columnMetadata.cellValueType());
+                for (ColumnMetadata columnMetadata : metadata.clusteringColumns())
+                {
+                    tableMetadataBuilder.addClusteringColumn(columnMetadata.name, columnMetadata.cellValueType());
+                }
+
+                TableMetadata tableMetadata = tableMetadataBuilder.build();
+                SerializationHeader serializationHeader = new SerializationHeader(false,
+                                                                                  tableMetadata,
+                                                                                  tableMetadata.regularAndStaticColumns(),
+                                                                                  EncodingStats.NO_STATS);
+                tablesMetaDataMap.get(metadata.id).add(serializationHeader);
+            }
+            catch (IOException e)
+            {
+                e.printStackTrace();
+            }
+            nextSHeaderBlockAddr = headerNode.getNext();
+        }while(nextSHeaderBlockAddr != 0);
+    }
+
     /*
     Reconstructs the tableshard array on heap reopen
      */
-    private static TableShard[] reloadTableShard(MemoryBlock block)
+    private static TableShard[] reloadTableShard(TransactionalMemoryBlock block)
     {
         //Shard count is saved first in the the memory block
         int tableShardCount = block.getInt(0);
@@ -156,7 +240,7 @@ public class TablesManager
      /*
     Reconstructs the volatile tablesMap on heap reopen
      */
-    private static void reloadTablesMap(MemoryBlock block)
+    private static void reloadTablesMap(TransactionalMemoryBlock block)
     {
         int position = 0;
         int len = 36; //TODO: change this hardcoded value
@@ -168,7 +252,7 @@ public class TablesManager
        {
            //Read an entry in the map from the memory block, create TableUUID from the key & a TableShard[]
            //from the value
-           heap.copyToArray(block, position, b, 0, len);
+           block.copyToArray(position, b, 0, len);
            String str = new String(b);
            if (!Arrays.equals(b, b1))
            {
@@ -176,7 +260,7 @@ public class TablesManager
                position += len;
                long addr = block.getLong(position);
                position += Long.BYTES;
-               MemoryBlock tableShardBlock = heap.memoryBlockFromAddress(Raw.class, addr);
+               TransactionalMemoryBlock tableShardBlock = heap.memoryBlockFromHandle(addr);
                TableShard[] tableShards = reloadTableShard(tableShardBlock);
                tablesMap.putIfAbsent(TableId.fromUUID(tableId), tableShards);
            }
@@ -188,9 +272,60 @@ public class TablesManager
     public TablesManager()
     {
 
-
     }
     private static volatile boolean shutdown;
+    //TODO: Can there be multiple versions with same headers, when 2 updates made simultaneously?
+    public void updateMetaData(TableMetadata metadata)
+    {
+
+        SerializationHeader serializationHeader = new SerializationHeader(false,
+                                                                          metadata,
+                                                                          metadata.regularAndStaticColumns(),
+                                                                          EncodingStats.NO_STATS);
+        long size = SerializationHeader.serializer.serializedSize(BigFormat.latestVersion,serializationHeader.toComponent());
+        int position =0;
+        TransactionalMemoryBlock serializationHeaderMemoryBlock = heap.allocateMemoryBlock(size);
+        DataOutputPlus dob = new MemoryBlockDataOutputPlus(serializationHeaderMemoryBlock,position);
+        try
+        {
+            SerializationHeader.serializer.serialize(BigFormat.latestVersion,serializationHeader.toComponent(),dob);
+        }
+        catch (IOException e)
+        {
+            e.printStackTrace();
+        }
+        PMemLinkedList pMemLinkedList = new PMemLinkedList(heap, sHeaderMemoryBlock.handle());
+        pMemLinkedList.add(heap,metadata.id,tablesMetaDataMap.get(metadata.id).size(),serializationHeaderMemoryBlock.handle());
+        if(tablesMetaDataMap.get(metadata.id) == null)
+            tablesMetaDataMap.put(metadata.id, new ArrayList<SerializationHeader>());
+        tablesMetaDataMap.get(metadata.id).add(serializationHeader);
+    }
+    private void persistSerializationHeader(ColumnFamilyStore cfs, PMemLinkedList pMemLinkedList)
+    {
+        SerializationHeader serializationHeader = new SerializationHeader(false,
+                                                                          cfs.metadata(),
+                                                                          cfs.metadata().regularAndStaticColumns(),
+                                                                          EncodingStats.NO_STATS);
+        long size = SerializationHeader.serializer.serializedSize(BigFormat.latestVersion, serializationHeader.toComponent());
+        int position = 0;
+        TransactionalMemoryBlock serializationHeaderMemoryBlock = heap.allocateMemoryBlock(size);
+        DataOutputPlus dob = new MemoryBlockDataOutputPlus(serializationHeaderMemoryBlock, position);
+        try
+        {
+            SerializationHeader.serializer.serialize(BigFormat.latestVersion, serializationHeader.toComponent(), dob);
+        }
+        catch (IOException e)
+        {
+            e.printStackTrace();
+        }
+        int headerListSize = 0;
+	List<SerializationHeader> headerList = tablesMetaDataMap.get(cfs.metadata.id);
+        if (headerList != null)
+            headerListSize = headerList.size();
+        pMemLinkedList.add(heap, cfs.metadata.id, headerListSize, serializationHeaderMemoryBlock.handle());//TODO: This makes redundant check, revisit
+        tablesMetaDataMap.put(cfs.metadata.id, new ArrayList<SerializationHeader>());
+        tablesMetaDataMap.get(cfs.metadata.id).add(serializationHeader);
+    }
 
     /**
      * THIS MUST BE INVOKED IMMEDIATELY DURING/RIGHT AFTER CREATING/INSTANTIATING A CFS,
@@ -198,44 +333,70 @@ public class TablesManager
      */
     public void add(TableId tableId, ColumnFamilyStore cfs)
     {
+        if(!tablesMetaDataMap.containsKey(tableId))
+        {
+            PMemLinkedList pMemLinkedList = new PMemLinkedList(heap, sHeaderMemoryBlock.handle());
+            PMemLLNode tableNode = pMemLinkedList.findTable(heap,tableId);
+            if(tableNode == null)
+            {
+                persistSerializationHeader(cfs,pMemLinkedList);
+            }
+            else
+            {
+                TableId tableNodeId = ((PMemTableNode)tableNode).getKey();//TableId.fromString(str);
+                if (tableNodeId.equals(tableId)) //It has been persisted, reload tablesmap
+                {
+                    reloadTablesMetadataMap(tableNode, cfs.metadata());
+                }
+                else   //Persist the entry
+                {
+                    persistSerializationHeader(cfs,pMemLinkedList);
+                }
+            }
+        }
+
         if (tablesMap.containsKey(tableId))
             return;
+
+
 
         // All system tables are assigned to shard 0 currently
         // TODO: Should system tables be distributed like user keyspaces? Revisit
         int treeCount ;
-        final MemoryBlock<Raw> rawTablesMemoryBlock;
+        final TransactionalMemoryBlock rawTablesMemoryBlock;
         if((SchemaConstants.isLocalSystemKeyspace(cfs.keyspace.getName())) || (SchemaConstants.isReplicatedSystemKeyspace(cfs.keyspace.getName())))
         {
-            rawTablesMemoryBlock = heap.allocateMemoryBlock(Raw.class, Long.BYTES + Integer.BYTES );//save the # of entries and the memoryblock address for the shards
+            rawTablesMemoryBlock = heap.allocateMemoryBlock(Long.BYTES + Integer.BYTES );//save the # of entries and the memoryblock address for the shards
             treeCount = 1;
         }
         else
         {
-            rawTablesMemoryBlock = heap.allocateMemoryBlock(Raw.class, (Long.BYTES * CORES) + Integer.BYTES);
+            rawTablesMemoryBlock = heap.allocateMemoryBlock((Long.BYTES * CORES) + Integer.BYTES);
             treeCount = CORES;
         }
         TableShard[] tableShards = new TableShard[treeCount];
         Transaction.run(heap,() ->
             {
-                rawTablesMemoryBlock.setTransactionalInt(0, treeCount );
+                rawTablesMemoryBlock.setInt(0, treeCount );
                 for (int i = 0; i < treeCount; i++)
                 {
                     //Save address of all the shards for the table
                     TableShard tableShard = new TableShard(heap);
-                    rawTablesMemoryBlock.setTransactionalLong((i*Long.BYTES) + TABLE_SHARD_DATAOFFSET, tableShard.getAddress());
+                    rawTablesMemoryBlock.setLong((i*Long.BYTES) + TABLE_SHARD_DATAOFFSET, tableShard.getAddress());
                     tableShards[i] = tableShard;
                 }
                 if (tablesMap.putIfAbsent(tableId, tableShards) == null)
                 {
                     byte[] tableUUIDBytes = tableId.toString().getBytes();
-                    rawMemoryBlock.transactionalCopyFromArray(tableUUIDBytes, 0, rawMemoryBlockIndex, tableUUIDBytes.length);
+                    rawMemoryBlock.copyFromArray(tableUUIDBytes, 0, rawMemoryBlockIndex, tableUUIDBytes.length);
                     rawMemoryBlockIndex += TABLE_ID_SIZE;
-                    rawMemoryBlock.setTransactionalLong(rawMemoryBlockIndex, rawTablesMemoryBlock.address());
+                    rawMemoryBlock.setLong(rawMemoryBlockIndex, rawTablesMemoryBlock.handle());
                     rawMemoryBlockIndex += Long.BYTES;
                 }
             });
     }
+
+
 
     private static String toKey(TableId tableId, int shard)
     {
@@ -317,6 +478,25 @@ public class TablesManager
         return future;
     }
 
+    public void garbageCollect(ColumnFamilyStore cfs)
+    {
+        FutureTask<Void>[] futures = new FutureTask[queues.length];
+        for(int i=0; i<queues.length; i++) {
+            FutureTask<Void> future = new FutureTask<>(new VacuumOperation(getTree(cfs.metadata.id, i)));
+            futures[i] = future;
+            try {
+                queues[i].put(future);
+            } catch (InterruptedException e) {
+                logger.info("Error occured during vacuum");
+                e.printStackTrace();
+            }
+        }
+
+        for (int i=0; i<futures.length; i++) {
+            while(!futures[i].isDone()){}
+        }
+    }
+
     private Future<UnfilteredRowIterator> select(ColumnFamilyStore cfs, ColumnFilter filter, ClusteringIndexFilter namesFilter, DecoratedKey decoratedKey)
     {
         if (shutdown)
@@ -383,9 +563,8 @@ public class TablesManager
     private void handleWrite(TableShard tableShard, PartitionUpdate update, UpdateTransaction indexer, OpOrder.Group opGroup)
     {
         // basically ignore the indexer and opGroup ... for now
-       // Transaction tx = new Transaction(heap);
         // TODO: probably need a try/catch block here ...
-        tableShard.apply(update);
+        tableShard.apply(update,indexer,opGroup);
     }
 
     private UnfilteredRowIterator handleRead(TableShard tableShard, ColumnFilter filter, DecoratedKey decoratedKey, TableMetadata tableMetadata) //throws IOException
@@ -400,10 +579,13 @@ public class TablesManager
         return tableShard.get(decoratedKey, filter,namesFilter,tableMetadata);
     }
 
+    private void vacuum(TableShard tableShard) {
+        tableShard.vacuum();
+    }
+
     /*
         thread / queue functions
      */
-    //public static void execute(MessagePassingQueue<FutureTask> queue)
     public static void execute(BlockingQueue<FutureTask> queue) throws InterruptedException
     {
         while(true)
@@ -445,6 +627,23 @@ public class TablesManager
         public Void call()
         {
             handleWrite(tableShard, update, indexer, opGroup);
+            return null;
+        }
+    }
+
+    class VacuumOperation implements Callable<Void>
+    {
+        private final TableShard tableShard;
+
+        VacuumOperation(TableShard tableShard)
+        {
+            this.tableShard = tableShard;
+        }
+
+        @Override
+        public Void call()
+        {
+            vacuum(tableShard);
             return null;
         }
     }

@@ -3,37 +3,44 @@
 package org.apache.cassandra.db.pmem.artree;
 
 import lib.llpl.*;
+import java.util.Optional;
 
 public class Node256 extends InternalNode {
     // 257 for Node256: 1 more slot for the blank radix child
-    private static final long SIZE = Node.HEADER_SIZE + 257L * 8L;
+    protected static final long SIZE = Node.HEADER_SIZE + 257L * 8L;
     private static final long CHILDREN_OFFSET = Node.HEADER_SIZE;
     private static final int  BLANK_RADIX_CHILD_INDEX = 256;
     private static final int  MAX_CAPACITY = 257;
 
-    Node256(Heap heap) {
+    /*Node256(TransactionalHeap heap) {
         super(heap, SIZE);
-        initType(Node.NODE256_TYPE);
-    }
+        //initType(Node.NODE256_TYPE);
+    }*/
 
-    Node256(Heap heap, MemoryBlock<Unbounded> mb) {
+    Node256(TransactionalHeap heap, TransactionalUnboundedMemoryBlock mb) {
         super(heap, mb);
     }
 
-    Node256(Heap heap, Node48 oldNode) {
-        this(heap);
+    Node256(TransactionalHeap heap, Node48 oldNode, Node newNode, Optional<Byte> radix) {
+        super(heap, SIZE, (Range range) -> {
         // offset is 1 to skip the TYPE field that's already set
-        heap.copyMemory(oldNode.mb, 1, this.mb, 1, Node.HEADER_SIZE - 1);
-        byte[] oldRadices = oldNode.getRadices();
-        for (int index = 0; index < oldRadices.length; index++) {
-            if (oldRadices[index] != 0) {
-                initValueAtIndex(index, oldNode.findValueAtIndex((int)(oldRadices[index] - 1)));
+            range.setByte(Node.NODE_TYPE_OFFSET, Node.NODE256_TYPE);
+            range.copyFromMemoryBlock(oldNode.mb, 1, 1, Node.HEADER_SIZE - 1);
+            byte[] oldRadices = oldNode.getRadices();
+            for (int index = 0; index < oldRadices.length; index++) {
+                if (oldRadices[index] != 0) {
+                    range.setLong(CHILDREN_OFFSET + index * Long.BYTES, oldNode.findValueAtIndex((int)(oldRadices[index] - 1)));
+                }
             }
-        }
-        if (oldNode.hasBlankRadixChild()) {
-            initValueAtIndex(BLANK_RADIX_CHILD_INDEX, oldNode.findValueAtIndex(oldNode.getBlankRadixIndex()));
-        }
-        this.mb.flush(0, this.SIZE);
+            if (oldNode.hasBlankRadixChild()) {
+                range.setLong(CHILDREN_OFFSET + BLANK_RADIX_CHILD_INDEX * Long.BYTES, oldNode.findValueAtIndex(oldNode.getBlankRadixIndex()));
+            }
+            //set value
+            if (radix.isPresent()) range.setLong(CHILDREN_OFFSET + ((int)radix.get() + 128) * Long.BYTES, newNode.address());
+            else range.setLong(CHILDREN_OFFSET + BLANK_RADIX_CHILD_INDEX * Long.BYTES, newNode.address());
+            //set childrencount
+            range.setShort(InternalNode.CHILDREN_COUNT_OFFSET, (short)(48 + 1));
+        });
     }
 
     @Override
@@ -82,6 +89,32 @@ public class Node256 extends InternalNode {
         return true;
     }
 
+    void deleteChild(Byte radix) {
+        int index;
+        if (radix == null) index = BLANK_RADIX_CHILD_INDEX;
+        else index = findChildIndex(radix);
+        if (findValueAtIndex(index) != 0) {
+            //mb.addToTransaction(0, this.SIZE);
+            //delete child at 'index'
+            mb.setLong(CHILDREN_OFFSET + index * Long.BYTES, 0L);
+            decChildrenCount();
+        }
+    }
+    
+    @Override
+    Byte findLowestRadix(byte radix, boolean visited) {
+        int cmp = visited ? radix : Byte.MIN_VALUE;
+        int lowest = Byte.MAX_VALUE;
+        // System.out.println("visited is "+visited+", need to find lowest radix between "+cmp+" and "+lowest);
+        for (int i=cmp + 1; i<=lowest; i++) {
+            if (findValueAtIndex(i + 128) != 0L) {
+                // System.out.println("Returning "+(byte)i);
+                return (byte)i;
+            }
+        }
+        return null;   
+    }
+
     @Override
     int findChildIndex(byte radix) {
         return (int)radix + 128;
@@ -96,25 +129,23 @@ public class Node256 extends InternalNode {
     @Override
     void putChildAtIndex(int index, Node child) {
         if (index == -1) return;
-        mb.setTransactionalLong(CHILDREN_OFFSET + index * Long.BYTES, child.address());
+        mb.setLong(CHILDREN_OFFSET + index * Long.BYTES, child.address());
     }
 
-    private void initValueAtIndex(int index, long value) {
+    /*private void initValueAtIndex(int index, long value) {
         mb.setDurableLong(CHILDREN_OFFSET + index * Long.BYTES, value);
-    }
+    }*/
 
     @Override
     short capacity() { return (short)MAX_CAPACITY; }
 
     @Override
-    InternalNode grow() { return null; }
+    InternalNode grow(Node child, Optional<Byte> radix) { return null; }
 
     @Override
     void printChildren(StringBuilder start, int depth) {
         for (int i = 0; i < capacity(); i++) {
-            if (findValueAtIndex(i) != 0) {
-                System.out.println(start + "For radix " + new String(new byte[]{(byte)(i-128)}) + "(" + (i-128) + "):");
-                Node node = getChildAtIndex(i);
+            if (findValueAtIndex(i) != 0) { System.out.println(start + "For radix " + new String(new byte[]{(byte)(i-128)}) + "(" + (i-128) + "):"); Node node = getChildAtIndex(i);
                 if( node != null) {
                     node.print(depth + 1);
                 }

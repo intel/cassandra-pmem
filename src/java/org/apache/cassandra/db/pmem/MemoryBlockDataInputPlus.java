@@ -20,21 +20,28 @@ package org.apache.cassandra.db.pmem;
 
 import java.io.IOException;
 
-import lib.llpl.Heap;
-import lib.llpl.MemoryBlock;
+import lib.llpl.TransactionalHeap;
+import lib.llpl.TransactionalMemoryBlock;
 import org.apache.cassandra.io.util.DataInputPlus;
 
 public class MemoryBlockDataInputPlus implements DataInputPlus
 {
-    private final MemoryBlock block;
-    private final Heap heap;
+    private final TransactionalMemoryBlock block;
+    private final TransactionalHeap heap;
     private int position;
 
-    public MemoryBlockDataInputPlus(MemoryBlock block, Heap heap)
+    public MemoryBlockDataInputPlus(TransactionalMemoryBlock block, TransactionalHeap heap)
     {
        this.block = block;
        this.heap = heap;
        this.position = 0;
+    }
+
+    public MemoryBlockDataInputPlus(TransactionalMemoryBlock block, TransactionalHeap heap, int position)
+    {
+        this.block = block;
+        this.heap = heap;
+        this.position = position;
     }
 
     public long position()
@@ -50,14 +57,14 @@ public class MemoryBlockDataInputPlus implements DataInputPlus
     @Override
     public void readFully(byte[] b) throws IOException
     {
-        heap.copyToArray(block,position,b,0,b.length);
+        block.copyToArray(position,b,0,b.length);
         position += b.length;
     }
 
     @Override
     public void readFully(byte[] b, int off, int len) throws IOException
     {
-        heap.copyToArray(block,position,b,off,len);
+        block.copyToArray(position,b,off,len);
         position += len;
     }
 
@@ -159,7 +166,7 @@ public class MemoryBlockDataInputPlus implements DataInputPlus
     {
         int utflen = block.getShort(position);
         byte[] bytes = new byte[utflen];
-        heap.copyToArray(block,position,bytes,0,utflen);
+        block.copyToArray(position,bytes,0,utflen);
         return new String(bytes);
     }
 }
