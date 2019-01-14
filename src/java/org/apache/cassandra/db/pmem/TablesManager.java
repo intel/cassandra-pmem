@@ -144,7 +144,7 @@ public class TablesManager
         // Register Allocation classes for the artree. need heap instance
         ARTree.registerAllocationClasses(heap);
         // Register row allocation class
-        heap.registerAllocationSize(120, false);
+        heap.registerAllocationSize(112, false);
 
         threads = new Thread[CORES];
         queues = new ArrayBlockingQueue[CORES];
