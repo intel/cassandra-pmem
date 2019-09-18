@@ -28,12 +28,14 @@ import java.util.*;
 
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.Gossiper;
@@ -68,6 +70,7 @@ public class StorageServiceServerTest
     @BeforeClass
     public static void setUp() throws ConfigurationException
     {
+        System.setProperty(Gossiper.Props.DISABLE_THREAD_VALIDATION, "true");
         DatabaseDescriptor.daemonInitialization();
         IEndpointSnitch snitch = new PropertyFileSnitch();
         DatabaseDescriptor.setEndpointSnitch(snitch);
@@ -617,5 +620,42 @@ public class StorageServiceServerTest
         //If we have the address and port in gossip use that
         Gossiper.instance.getEndpointStateForEndpoint(internalAddress).addApplicationState(ApplicationState.NATIVE_ADDRESS_AND_PORT, valueFactory.nativeaddressAndPort(InetAddressAndPort.getByName("127.0.0.3:666")));
         assertEquals("127.0.0.3:666", StorageService.instance.getNativeaddress(internalAddress, true));
+    }
+
+    @Test
+    public void testAuditLogEnableLoggerNotFound() throws Exception
+    {
+        StorageService.instance.enableAuditLog(null, null, null, null, null, null, null);
+        assertTrue(AuditLogManager.getInstance().isAuditingEnabled());
+        try
+        {
+            StorageService.instance.enableAuditLog("foobar", null, null, null, null, null, null);
+            Assert.fail();
+        }
+        catch (IllegalStateException ex)
+        {
+            StorageService.instance.disableAuditLog();
+        }
+    }
+
+    @Test
+    public void testAuditLogEnableLoggerTransitions() throws Exception
+    {
+        StorageService.instance.enableAuditLog(null, null, null, null, null, null, null);
+        assertTrue(AuditLogManager.getInstance().isAuditingEnabled());
+
+        try
+        {
+            StorageService.instance.enableAuditLog("foobar", null, null, null, null, null, null);
+        }
+        catch (ConfigurationException | IllegalStateException e)
+        {
+            e.printStackTrace();
+        }
+
+        StorageService.instance.enableAuditLog(null, null, null, null, null, null, null);
+        assertTrue(AuditLogManager.getInstance().isAuditingEnabled());
+
+        StorageService.instance.disableAuditLog();
     }
 }

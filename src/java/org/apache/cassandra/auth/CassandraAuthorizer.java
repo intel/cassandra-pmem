@@ -27,7 +27,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
@@ -35,11 +34,8 @@ import org.apache.cassandra.cql3.statements.SelectStatement;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.exceptions.*;
+import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.service.ClientState;
-
-import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -57,7 +53,7 @@ public class CassandraAuthorizer implements IAuthorizer
     private static final String RESOURCE = "resource";
     private static final String PERMISSIONS = "permissions";
 
-    SelectStatement authorizeRoleStatement;
+    private SelectStatement authorizeRoleStatement;
 
     public CassandraAuthorizer()
     {
@@ -67,15 +63,24 @@ public class CassandraAuthorizer implements IAuthorizer
     // or indirectly via roles granted to the user.
     public Set<Permission> authorize(AuthenticatedUser user, IResource resource)
     {
-        if (user.isSuper())
-            return resource.applicablePermissions();
+        try
+        {
+            if (user.isSuper())
+                return resource.applicablePermissions();
 
-        Set<Permission> permissions = EnumSet.noneOf(Permission.class);
+            Set<Permission> permissions = EnumSet.noneOf(Permission.class);
 
-        for (RoleResource role: user.getRoles())
-            addPermissionsForRole(permissions, resource, role);
-
-        return permissions;
+            // Even though we only care about the RoleResource here, we use getRoleDetails as
+            // it saves a Set creation in RolesCache
+            for (Role role: user.getRoleDetails())
+                addPermissionsForRole(permissions, resource, role.resource);
+            return permissions;
+        }
+        catch (RequestExecutionException | RequestValidationException e)
+        {
+            logger.debug("Failed to authorize {} for {}", user, resource);
+            throw new UnauthorizedException("Unable to perform authorization of permissions: " + e.getMessage(), e);
+        }
     }
 
     public void grant(AuthenticatedUser performer, Set<Permission> permissions, IResource resource, RoleResource grantee)
@@ -115,7 +120,7 @@ public class CassandraAuthorizer implements IAuthorizer
                                                               AuthKeyspace.RESOURCE_ROLE_INDEX,
                                                               escape(row.getString("resource")),
                                                               escape(revokee.getRoleName())),
-                                                ClientState.forInternalCalls()).statement);
+                                                ClientState.forInternalCalls()));
 
             }
 
@@ -123,15 +128,13 @@ public class CassandraAuthorizer implements IAuthorizer
                                                                      SchemaConstants.AUTH_KEYSPACE_NAME,
                                                                      AuthKeyspace.ROLE_PERMISSIONS,
                                                                      escape(revokee.getRoleName())),
-                                                       ClientState.forInternalCalls()).statement);
+                                                       ClientState.forInternalCalls()));
 
             executeLoggedBatch(statements);
         }
         catch (RequestExecutionException | RequestValidationException e)
         {
-            logger.warn("CassandraAuthorizer failed to revoke all permissions of {}: {}",
-                        revokee.getRoleName(),
-                        e.getMessage());
+            logger.warn(String.format("CassandraAuthorizer failed to revoke all permissions of %s", revokee.getRoleName()), e);
         }
     }
 
@@ -155,29 +158,28 @@ public class CassandraAuthorizer implements IAuthorizer
                                                                          AuthKeyspace.ROLE_PERMISSIONS,
                                                                          escape(row.getString("role")),
                                                                          escape(droppedResource.getName())),
-                                                           ClientState.forInternalCalls()).statement);
+                                                           ClientState.forInternalCalls()));
             }
 
             statements.add(QueryProcessor.getStatement(String.format("DELETE FROM %s.%s WHERE resource = '%s'",
                                                                      SchemaConstants.AUTH_KEYSPACE_NAME,
                                                                      AuthKeyspace.RESOURCE_ROLE_INDEX,
                                                                      escape(droppedResource.getName())),
-                                                                               ClientState.forInternalCalls()).statement);
+                                                      ClientState.forInternalCalls()));
 
             executeLoggedBatch(statements);
         }
         catch (RequestExecutionException | RequestValidationException e)
         {
-            logger.warn("CassandraAuthorizer failed to revoke all permissions on {}: {}", droppedResource, e.getMessage());
-            return;
+            logger.warn(String.format("CassandraAuthorizer failed to revoke all permissions on %s", droppedResource), e);
         }
     }
 
     private void executeLoggedBatch(List<CQLStatement> statements)
     throws RequestExecutionException, RequestValidationException
     {
-        BatchStatement batch = new BatchStatement(0,
-                                                  BatchStatement.Type.LOGGED,
+        BatchStatement batch = new BatchStatement(BatchStatement.Type.LOGGED,
+                                                  VariableSpecifications.empty(),
                                                   Lists.newArrayList(Iterables.filter(statements, ModificationStatement.class)),
                                                   Attributes.none());
         processBatch(batch);
@@ -334,7 +336,7 @@ public class CassandraAuthorizer implements IAuthorizer
                                      SchemaConstants.AUTH_KEYSPACE_NAME,
                                      permissionsTable,
                                      entityname);
-        return (SelectStatement) QueryProcessor.getStatement(query, ClientState.forInternalCalls()).statement;
+        return (SelectStatement) QueryProcessor.getStatement(query, ClientState.forInternalCalls());
     }
 
     // We only worry about one character ('). Make sure it's properly escaped.

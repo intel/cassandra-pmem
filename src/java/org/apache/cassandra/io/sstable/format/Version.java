@@ -55,6 +55,8 @@ public abstract class Version
 
     public abstract boolean hasPendingRepair();
 
+    public abstract boolean hasIsTransient();
+
     public abstract boolean hasMetadataChecksum();
 
     /**
@@ -63,6 +65,8 @@ public abstract class Version
      * @return True if the bloomfilter file is old serialization format
      */
     public abstract boolean hasOldBfFormat();
+
+    public abstract boolean hasAccurateMinMax();
 
     public String getVersion()
     {

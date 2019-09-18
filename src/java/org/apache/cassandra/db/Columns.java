@@ -28,6 +28,7 @@ import com.google.common.collect.Iterators;
 import com.google.common.hash.Hasher;
 
 import net.nicoulaj.compilecommand.annotations.DontInline;
+import org.apache.cassandra.exceptions.UnknownColumnException;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.cql3.ColumnIdentifier;
@@ -53,7 +54,16 @@ public class Columns extends AbstractCollection<ColumnMetadata> implements Colle
 {
     public static final Serializer serializer = new Serializer();
     public static final Columns NONE = new Columns(BTree.empty(), 0);
-    private static final ColumnMetadata FIRST_COMPLEX =
+
+    private static final ColumnMetadata FIRST_COMPLEX_STATIC =
+        new ColumnMetadata("",
+                           "",
+                           ColumnIdentifier.getInterned(ByteBufferUtil.EMPTY_BYTE_BUFFER, UTF8Type.instance),
+                           SetType.getInstance(UTF8Type.instance, true),
+                           ColumnMetadata.NO_POSITION,
+                           ColumnMetadata.Kind.STATIC);
+
+    private static final ColumnMetadata FIRST_COMPLEX_REGULAR =
         new ColumnMetadata("",
                            "",
                            ColumnIdentifier.getInterned(ByteBufferUtil.EMPTY_BYTE_BUFFER, UTF8Type.instance),
@@ -102,11 +112,14 @@ public class Columns extends AbstractCollection<ColumnMetadata> implements Colle
 
     private static int findFirstComplexIdx(Object[] tree)
     {
-        // have fast path for common no-complex case
+        if (BTree.isEmpty(tree))
+            return 0;
+
         int size = BTree.size(tree);
-        if (!BTree.isEmpty(tree) && BTree.<ColumnMetadata>findByIndex(tree, size - 1).isSimple())
-            return size;
-        return BTree.ceilIndex(tree, Comparator.naturalOrder(), FIRST_COMPLEX);
+        ColumnMetadata last = BTree.findByIndex(tree, size - 1);
+        return last.isSimple()
+             ? size
+             : BTree.ceilIndex(tree, Comparator.naturalOrder(), last.isStatic() ? FIRST_COMPLEX_STATIC : FIRST_COMPLEX_REGULAR);
     }
 
     /**
@@ -442,7 +455,7 @@ public class Columns extends AbstractCollection<ColumnMetadata> implements Colle
                     // deserialization. The column will be ignore later on anyway.
                     column = metadata.getDroppedColumn(name);
                     if (column == null)
-                        throw new RuntimeException("Unknown column " + UTF8Type.instance.getString(name) + " during deserialization");
+                        throw new UnknownColumnException("Unknown column " + UTF8Type.instance.getString(name) + " during deserialization");
                 }
                 builder.add(column);
             }
@@ -526,6 +539,8 @@ public class Columns extends AbstractCollection<ColumnMetadata> implements Colle
                     }
                     encoded >>>= 1;
                 }
+                if (encoded != 0)
+                    throw new IOException("Invalid Columns subset bytes; too many bits set:" + Long.toBinaryString(encoded));
                 return new Columns(builder.build(), firstComplexIdx);
             }
         }

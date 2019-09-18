@@ -544,7 +544,7 @@ public class TablesManager
             }
         }
         return iterators.isEmpty() ? EmptyIterators.unfilteredPartition(metadata)
-                                   : UnfilteredPartitionIterators.mergeLazily(iterators, FBUtilities.nowInSeconds());
+                                   : UnfilteredPartitionIterators.mergeLazily(iterators);
     }
 
     public Future<UnfilteredRowIterator> makeRowIterator(ColumnFamilyStore cfs, ColumnFilter filter, DecoratedKey partitionKey)
@@ -590,19 +590,22 @@ public class TablesManager
     {
         while(true)
         {
+            FutureTask entry = queue.take();
             try
             {
-                FutureTask entry = queue.take();
+
                 entry.run();
-                if(entry.get() instanceof PmemRowMapIterator) ((PmemRowMapIterator)(entry.get())).ack.get();
+                if(entry.get() instanceof PmemRowMapIterator) ((PmemRowMapIterator)(entry.get())).ack.get(); //TODO: Is a timeout needed here
             }
             catch(InterruptedException e)
             {
-                e.printStackTrace();
+                entry.cancel(true);
+                logger.info(e.getMessage());
             }
             catch(ExecutionException e)
             {
-                e.printStackTrace();
+                entry.cancel(true);
+                logger.info(e.getMessage());
             }
         }
 

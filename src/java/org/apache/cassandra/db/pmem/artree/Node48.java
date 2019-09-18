@@ -17,11 +17,6 @@ public class Node48 extends InternalNode {
     // the indices to the children will be 1-based, so an index of 0 is invalid
     private byte[] radices;
 
-    /*Node48(TransactionalHeap heap) {
-        super(heap, SIZE);
-        //initType(Node.NODE48_TYPE);
-    }*/
-
     Node48(TransactionalHeap heap, TransactionalUnboundedMemoryBlock mb) {
         super(heap, mb);
     }
@@ -74,7 +69,10 @@ public class Node48 extends InternalNode {
         if (hasBlank) {
             entries[index++] = new NodeEntry((byte)0, getChildAtIndex(blankIndex=getBlankRadixIndex()));
         }
-        for (int i=0; i < MAX_RADICES; i++) {
+        for (int i=128; i < MAX_RADICES; i++) {
+            if (radices[(int)i] != blankIndex && radices[(int)i] !=0) entries[index++] = new NodeEntry((byte)(i-128), getChildAtIndex(radices[i]-1));
+        }
+        for (int i=0; i < (MAX_RADICES / 2); i++) {
             if (radices[(int)i] != blankIndex && radices[(int)i] !=0) entries[index++] = new NodeEntry((byte)(i-128), getChildAtIndex(radices[i]-1));
         }
         return entries;
@@ -105,7 +103,6 @@ public class Node48 extends InternalNode {
         }
         else index = findChildIndex(radix);
         if (index != -1) {
-            //mb.addToTransaction(0, this.SIZE);
             mb.withRange(0, this.SIZE, (Range range) ->{
                 if (radix != null) {
                     //delete radix
@@ -137,10 +134,8 @@ public class Node48 extends InternalNode {
     Byte findLowestRadix(byte radix, boolean visited) {
         int cmp = visited ? radix : Byte.MIN_VALUE;
         int lowest = Byte.MAX_VALUE;
-        // System.out.println("visited is "+visited+", need to find lowest radix between "+cmp+" and "+lowest);
         for (int i=cmp + 1; i<=lowest; i++) {
             if (findChildIndex((byte)i) != -1) {
-                // System.out.println("Returning "+(byte)i);
                 return (byte)i;
             }
         }
@@ -171,7 +166,6 @@ public class Node48 extends InternalNode {
 
     @Override
     InternalNode grow(Node child, Optional<Byte> radix) {
-//        System.out.println("needs to grow 48 to 256");
         return new Node256(heap, this, child, radix);
     }
 
@@ -181,7 +175,6 @@ public class Node48 extends InternalNode {
         Node node;
         for (int i = 0; i < radices.length; i++) {
             if (radices[i] != 0) {
-                // System.out.println(start + "For radix " + String.format("%02X ", radices[i]) + ":");
                 System.out.println(start + "For radix " + new String(new byte[]{(byte)(i-128)}) + "(" + (i-128) + "):");
                 node = getChildAtIndex(radices[i]-1);
                 if(node != null)

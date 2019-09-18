@@ -19,6 +19,8 @@ package org.apache.cassandra.cql3.statements;
 
 import java.util.*;
 
+import org.apache.cassandra.audit.AuditLogContext;
+import org.apache.cassandra.audit.AuditLogEntryType;
 import org.apache.cassandra.auth.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -78,7 +80,7 @@ public class ListPermissionsStatement extends AuthorizationStatement
             throw new InvalidRequestException(String.format("%s doesn't exist", grantee));
    }
 
-    public void checkAccess(ClientState state)
+    public void authorize(ClientState state)
     {
         // checked in validate
     }
@@ -136,5 +138,11 @@ public class ListPermissionsStatement extends AuthorizationStatement
     public String toString()
     {
         return ToStringBuilder.reflectionToString(this, ToStringStyle.SHORT_PREFIX_STYLE);
+    }
+
+    @Override
+    public AuditLogContext getAuditLogContext()
+    {
+        return new AuditLogContext(AuditLogEntryType.LIST_PERMISSIONS);
     }
 }

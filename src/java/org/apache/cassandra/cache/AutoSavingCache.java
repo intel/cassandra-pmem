@@ -43,6 +43,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.CompactionInfo;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
+import org.apache.cassandra.db.compaction.CompactionInfo.Unit;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.*;
 import org.apache.cassandra.io.util.CorruptFileException;
@@ -315,12 +316,12 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
             else
                 type = OperationType.UNKNOWN;
 
-            info = new CompactionInfo(TableMetadata.minimal(SchemaConstants.SYSTEM_KEYSPACE_NAME, cacheType.toString()),
-                                      type,
-                                      0,
-                                      keysEstimate,
-                                      "keys",
-                                      UUIDGen.getTimeUUID());
+            info = CompactionInfo.withoutSSTables(TableMetadata.minimal(SchemaConstants.SYSTEM_KEYSPACE_NAME, cacheType.toString()),
+                                                  type,
+                                                  0,
+                                                  keysEstimate,
+                                                  Unit.KEYS,
+                                                  UUIDGen.getTimeUUID());
         }
 
         public CacheService.CacheType cacheType()

@@ -136,8 +136,6 @@ public class JavaDriverClient
                                                 .withoutJMXReporting()
                                                 .withProtocolVersion(protocolVersion)
                                                 .withoutMetrics(); // The driver uses metrics 3 with conflict with our version
-        if (allowServerPortDiscovery)
-            clusterBuilder = clusterBuilder.allowServerPortDiscovery();
 
         if (loadBalancingPolicy != null)
             clusterBuilder.withLoadBalancingPolicy(loadBalancingPolicy);
@@ -148,7 +146,7 @@ public class JavaDriverClient
             sslContext = SSLFactory.createSSLContext(encryptionOptions, true);
             SSLOptions sslOptions = JdkSSLOptions.builder()
                                                  .withSSLContext(sslContext)
-                                                 .withCipherSuites(encryptionOptions.cipher_suites).build();
+                                                 .withCipherSuites(encryptionOptions.cipher_suites.toArray(new String[0])).build();
             clusterBuilder.withSSL(sslOptions);
         }
 

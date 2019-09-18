@@ -70,11 +70,11 @@ public class MemoryBlockDataOutputPlus implements DataOutputPlus
             write(buffer);
     }
 
-    @Override
-    public <R> R applyToChannel(Function<WritableByteChannel, R> c)
+  //  @Override
+   /* public <R> R applyToChannel(Function<WritableByteChannel, R> c)
     {
         return null;
-    }
+    }*/
 
     @Override
     public void write(int b) throws IOException

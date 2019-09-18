@@ -21,7 +21,6 @@ import java.net.SocketTimeoutException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.*;
@@ -29,6 +28,7 @@ import com.google.common.util.concurrent.Futures;
 
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,14 +40,17 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.*;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.metrics.StreamingMetrics;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.net.async.OutboundConnectionIdentifier;
+import org.apache.cassandra.net.OutboundConnectionSettings;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.streaming.async.NettyStreamingMessageSender;
 import org.apache.cassandra.streaming.messages.*;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JVMStabilityInspector;
+
+import static com.google.common.collect.Iterables.all;
+import static org.apache.cassandra.net.MessagingService.current_version;
 
 /**
  * Handles the streaming a one or more streams to and from a specific remote node.
@@ -132,11 +135,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
      * Each {@code StreamSession} is identified by this InetAddressAndPort which is broadcast address of the node streaming.
      */
     public final InetAddressAndPort peer;
-
-    /**
-     * Preferred IP Address/Port of the peer; this is the address that will be connect to. Can be the same as {@linkplain #peer}.
-     */
-    private final InetAddressAndPort preferredPeerInetAddressAndPort;
+    private final OutboundConnectionSettings template;
 
     private final int index;
 
@@ -180,29 +179,25 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     public StreamSession(StreamOperation streamOperation, InetAddressAndPort peer, StreamConnectionFactory factory,
                          int index, UUID pendingRepair, PreviewKind previewKind)
     {
-        this(streamOperation, peer, factory, index, pendingRepair, previewKind, MessagingService.instance()::getPreferredRemoteAddr);
+        this(streamOperation, new OutboundConnectionSettings(peer), factory, index, pendingRepair, previewKind);
     }
-
-    @VisibleForTesting
-    public StreamSession(StreamOperation streamOperation, InetAddressAndPort peer, StreamConnectionFactory factory,
-                         int index, UUID pendingRepair, PreviewKind previewKind,
-                         Function<InetAddressAndPort, InetAddressAndPort> preferredIpMapper)
+    /**
+     * Create new streaming session with the peer.
+     */
+    public StreamSession(StreamOperation streamOperation, OutboundConnectionSettings template, StreamConnectionFactory factory,
+                         int index, UUID pendingRepair, PreviewKind previewKind)
     {
         this.streamOperation = streamOperation;
-        this.peer = peer;
+        this.peer = template.to;
+        this.template = template;
         this.index = index;
-        InetAddressAndPort preferredPeerEndpoint = preferredIpMapper.apply(peer);
-        this.preferredPeerInetAddressAndPort = (preferredPeerEndpoint == null) ? peer : preferredPeerEndpoint;
 
-        OutboundConnectionIdentifier id = OutboundConnectionIdentifier.stream(InetAddressAndPort.getByAddressOverrideDefaults(FBUtilities.getJustLocalAddress(), 0),
-                                                                              preferredPeerInetAddressAndPort);
-
-        this.messageSender = new NettyStreamingMessageSender(this, id, factory, StreamMessage.CURRENT_VERSION, previewKind.isPreview());
-        this.metrics = StreamingMetrics.get(preferredPeerInetAddressAndPort);
+        this.messageSender = new NettyStreamingMessageSender(this, template, factory, current_version, previewKind.isPreview());
+        this.metrics = StreamingMetrics.get(peer);
         this.pendingRepair = pendingRepair;
         this.previewKind = previewKind;
 
-        logger.debug("Creating stream session peer={} preferredPeerInetAddressAndPort={}", peer, preferredPeerInetAddressAndPort);
+        logger.debug("Creating stream session to {}", template);
     }
 
     public UUID planId()
@@ -242,7 +237,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
 
     public StreamReceiver getAggregator(TableId tableId)
     {
-        assert receivers.containsKey(tableId);
+        assert receivers.containsKey(tableId) : "Missing tableId " + tableId;
         return receivers.get(tableId).getReceiver();
     }
 
@@ -281,7 +276,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         {
             logger.info("[Stream #{}] Starting streaming to {}{}", planId(),
                                                                    peer,
-                                                                   peer.equals(preferredPeerInetAddressAndPort) ? "" : " through " + preferredPeerInetAddressAndPort);
+                                                                   template.connectTo == null ? "" : " through " + template.connectTo);
             messageSender.initialize();
             onInitializationComplete();
         }
@@ -295,39 +290,50 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     /**
      * Request data fetch task to this session.
      *
+     * Here, we have to encode both _local_ range transientness (encoded in Replica itself, in RangesAtEndpoint)
+     * and _remote_ (source) range transientmess, which is encoded by splitting ranges into full and transient.
+     *
      * @param keyspace Requesting keyspace
-     * @param ranges Ranges to retrieve data
+     * @param fullRanges Ranges to retrieve data that will return full data from the source
+     * @param transientRanges Ranges to retrieve data that will return transient data from the source
      * @param columnFamilies ColumnFamily names. Can be empty if requesting all CF under the keyspace.
      */
-    public void addStreamRequest(String keyspace, Collection<Range<Token>> ranges, Collection<String> columnFamilies)
+    public void addStreamRequest(String keyspace, RangesAtEndpoint fullRanges, RangesAtEndpoint transientRanges, Collection<String> columnFamilies)
     {
-        requests.add(new StreamRequest(keyspace, ranges, columnFamilies));
+        //It should either be a dummy address for repair or if it's a bootstrap/move/rebuild it should be this node
+        assert all(fullRanges, Replica::isSelf) || RangesAtEndpoint.isDummyList(fullRanges) : fullRanges.toString();
+        assert all(transientRanges, Replica::isSelf) || RangesAtEndpoint.isDummyList(transientRanges) : transientRanges.toString();
+
+        requests.add(new StreamRequest(keyspace, fullRanges, transientRanges, columnFamilies));
     }
 
     /**
      * Set up transfer for specific keyspace/ranges/CFs
      *
      * @param keyspace Transfer keyspace
-     * @param ranges Transfer ranges
+     * @param replicas Transfer ranges
      * @param columnFamilies Transfer ColumnFamilies
      * @param flushTables flush tables?
      */
-    synchronized void addTransferRanges(String keyspace, Collection<Range<Token>> ranges, Collection<String> columnFamilies, boolean flushTables)
+    synchronized void addTransferRanges(String keyspace, RangesAtEndpoint replicas, Collection<String> columnFamilies, boolean flushTables)
     {
         failIfFinished();
         Collection<ColumnFamilyStore> stores = getColumnFamilyStores(keyspace, columnFamilies);
         if (flushTables)
             flushSSTables(stores);
 
-        List<Range<Token>> normalizedRanges = Range.normalize(ranges);
-        List<OutgoingStream> streams = getOutgoingStreamsForRanges(normalizedRanges, stores, pendingRepair, previewKind);
+        //Was it safe to remove this normalize, sorting seems not to matter, merging? Maybe we should have?
+        //Do we need to unwrap here also or is that just making it worse?
+        //Range and if it's transient
+        RangesAtEndpoint unwrappedRanges = replicas.unwrap();
+        List<OutgoingStream> streams = getOutgoingStreamsForRanges(unwrappedRanges, stores, pendingRepair, previewKind);
         addTransferStreams(streams);
         Set<Range<Token>> toBeUpdated = transferredRangesPerKeyspace.get(keyspace);
         if (toBeUpdated == null)
         {
             toBeUpdated = new HashSet<>();
         }
-        toBeUpdated.addAll(ranges);
+        toBeUpdated.addAll(replicas.ranges());
         transferredRangesPerKeyspace.put(keyspace, toBeUpdated);
     }
 
@@ -354,14 +360,14 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     }
 
     @VisibleForTesting
-    public List<OutgoingStream> getOutgoingStreamsForRanges(Collection<Range<Token>> ranges, Collection<ColumnFamilyStore> stores, UUID pendingRepair, PreviewKind previewKind)
+    public List<OutgoingStream> getOutgoingStreamsForRanges(RangesAtEndpoint replicas, Collection<ColumnFamilyStore> stores, UUID pendingRepair, PreviewKind previewKind)
     {
         List<OutgoingStream> streams = new ArrayList<>();
         try
         {
             for (ColumnFamilyStore cfs: stores)
             {
-                streams.addAll(cfs.getStreamManager().createOutgoingStreams(this, ranges, pendingRepair, previewKind));
+                streams.addAll(cfs.getStreamManager().createOutgoingStreams(this, replicas, pendingRepair, previewKind));
             }
         }
         catch (Throwable t)
@@ -529,7 +535,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             logger.error("[Stream #{}] Did not receive response from peer {}{} for {} secs. Is peer down? " +
                          "If not, maybe try increasing streaming_keep_alive_period_in_secs.", planId(),
                          peer.getHostAddress(true),
-                         peer.equals(preferredPeerInetAddressAndPort) ? "" : " through " + preferredPeerInetAddressAndPort.getHostAddress(true),
+                         template.connectTo == null ? "" : " through " + template.connectTo.getHostAddress(true),
                          2 * DatabaseDescriptor.getStreamingKeepAlivePeriod(),
                          e);
         }
@@ -537,7 +543,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         {
             logger.error("[Stream #{}] Streaming error occurred on session with peer {}{}", planId(),
                          peer.getHostAddress(true),
-                         peer.equals(preferredPeerInetAddressAndPort) ? "" : " through " + preferredPeerInetAddressAndPort.getHostAddress(true),
+                         template.connectTo == null ? "" : " through " + template.connectTo.getHostAddress(true),
                          e);
         }
     }
@@ -560,7 +566,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     {
 
         for (StreamRequest request : requests)
-            addTransferRanges(request.keyspace, request.ranges, request.columnFamilies, true); // always flush on stream request
+            addTransferRanges(request.keyspace, RangesAtEndpoint.concat(request.full, request.transientReplicas), request.columnFamilies, true); // always flush on stream request
         for (StreamSummary summary : summaries)
             prepareReceiving(summary);
 
@@ -691,7 +697,8 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         List<StreamSummary> transferSummaries = Lists.newArrayList();
         for (StreamTask transfer : transfers.values())
             transferSummaries.add(transfer.getSummary());
-        return new SessionInfo(peer, index, preferredPeerInetAddressAndPort, receivingSummaries, transferSummaries, state);
+        // TODO: the connectTo treatment here is peculiar, and needs thinking about - since the connection factory can change it
+        return new SessionInfo(peer, index, template.connectTo == null ? peer : template.connectTo, receivingSummaries, transferSummaries, state);
     }
 
     public synchronized void taskCompleted(StreamReceiveTask completedTask)
@@ -777,7 +784,8 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         FBUtilities.waitOnFutures(flushes);
     }
 
-    private synchronized void prepareReceiving(StreamSummary summary)
+    @VisibleForTesting
+    public synchronized void prepareReceiving(StreamSummary summary)
     {
         failIfFinished();
         if (summary.files > 0)
@@ -809,5 +817,17 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             }
         }
         maybeCompleted();
+    }
+
+    @VisibleForTesting
+    public int getNumRequests()
+    {
+        return requests.size();
+    }
+
+    @VisibleForTesting
+    public int getNumTransfers()
+    {
+        return transferredRangesPerKeyspace.size();
     }
 }

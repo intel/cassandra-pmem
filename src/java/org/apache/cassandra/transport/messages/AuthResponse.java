@@ -20,10 +20,13 @@ package org.apache.cassandra.transport.messages;
 import java.nio.ByteBuffer;
 
 import io.netty.buffer.ByteBuf;
+import org.apache.cassandra.audit.AuditLogEntry;
+import org.apache.cassandra.audit.AuditLogEntryType;
+import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.auth.AuthenticatedUser;
 import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.exceptions.AuthenticationException;
-import org.apache.cassandra.metrics.AuthMetrics;
+import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.*;
 
@@ -68,8 +71,10 @@ public class AuthResponse extends Message.Request
     }
 
     @Override
-    public Response execute(QueryState queryState, long queryStartNanoTime)
+    protected Response execute(QueryState queryState, long queryStartNanoTime, boolean traceRequest)
     {
+        AuditLogManager auditLogManager = AuditLogManager.getInstance();
+
         try
         {
             IAuthenticator.SaslNegotiator negotiator = ((ServerConnection) connection).getSaslNegotiator(queryState);
@@ -78,7 +83,9 @@ public class AuthResponse extends Message.Request
             {
                 AuthenticatedUser user = negotiator.getAuthenticatedUser();
                 queryState.getClientState().login(user);
-                AuthMetrics.instance.markSuccess();
+                ClientMetrics.instance.markAuthSuccess();
+                if (auditLogManager.isAuditingEnabled())
+                    logSuccess(queryState);
                 // authentication is complete, send a ready message to the client
                 return new AuthSuccess(challenge);
             }
@@ -89,8 +96,30 @@ public class AuthResponse extends Message.Request
         }
         catch (AuthenticationException e)
         {
-            AuthMetrics.instance.markFailure();
+            ClientMetrics.instance.markAuthFailure();
+            if (auditLogManager.isAuditingEnabled())
+                logException(queryState, e);
             return ErrorMessage.fromException(e);
         }
+    }
+
+    private void logSuccess(QueryState state)
+    {
+        AuditLogEntry entry =
+            new AuditLogEntry.Builder(state)
+                             .setOperation("LOGIN SUCCESSFUL")
+                             .setType(AuditLogEntryType.LOGIN_SUCCESS)
+                             .build();
+        AuditLogManager.getInstance().log(entry);
+    }
+
+    private void logException(QueryState state, AuthenticationException e)
+    {
+        AuditLogEntry entry =
+            new AuditLogEntry.Builder(state)
+                             .setOperation("LOGIN FAILURE")
+                             .setType(AuditLogEntryType.LOGIN_ERROR)
+                             .build();
+        AuditLogManager.getInstance().log(entry, e);
     }
 }

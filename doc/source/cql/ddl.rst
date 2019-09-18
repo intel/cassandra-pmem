@@ -73,13 +73,15 @@ A keyspace is created using a ``CREATE KEYSPACE`` statement:
 
 For instance::
 
-    CREATE KEYSPACE Excelsior
-               WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3};
+    CREATE KEYSPACE excelsior
+        WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3};
 
-    CREATE KEYSPACE Excalibur
-               WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1' : 1, 'DC2' : 3}
-                AND durable_writes = false;
+    CREATE KEYSPACE excalibur
+        WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1' : 1, 'DC2' : 3}
+        AND durable_writes = false;
 
+Attempting to create a keyspace that already exists will return an error unless the ``IF NOT EXISTS`` option is used. If
+it is used, the statement will be a no-op if the keyspace already exists.
 
 The supported ``options`` are:
 
@@ -96,14 +98,80 @@ The ``replication`` property is mandatory and must at least contains the ``'clas
 :ref:`replication strategy <replication-strategy>` class to use. The rest of the sub-options depends on what replication
 strategy is used. By default, Cassandra support the following ``'class'``:
 
-- ``'SimpleStrategy'``: A simple strategy that defines a replication factor for the whole cluster. The only sub-options
-  supported is ``'replication_factor'`` to define that replication factor and is mandatory.
-- ``'NetworkTopologyStrategy'``: A replication strategy that allows to set the replication factor independently for
-  each data-center. The rest of the sub-options are key-value pairs where a key is a data-center name and its value is
-  the associated replication factor.
+``SimpleStrategy``
+""""""""""""""""""
 
-Attempting to create a keyspace that already exists will return an error unless the ``IF NOT EXISTS`` option is used. If
-it is used, the statement will be a no-op if the keyspace already exists.
+A simple strategy that defines a replication factor for data to be spread
+across the entire cluster. This is generally not a wise choice for production
+because it does not respect datacenter layouts and can lead to wildly varying
+query latency. For a production ready strategy, see
+``NetworkTopologyStrategy``. ``SimpleStrategy`` supports a single mandatory argument:
+
+========================= ====== ======= =============================================
+sub-option                 type   since   description
+========================= ====== ======= =============================================
+``'replication_factor'``   int    all     The number of replicas to store per range
+========================= ====== ======= =============================================
+
+``NetworkTopologyStrategy``
+"""""""""""""""""""""""""""
+
+A production ready replication strategy that allows to set the replication
+factor independently for each data-center. The rest of the sub-options are
+key-value pairs where a key is a data-center name and its value is the
+associated replication factor. Options:
+
+===================================== ====== ====== =============================================
+sub-option                             type   since  description
+===================================== ====== ====== =============================================
+``'<datacenter>'``                     int    all    The number of replicas to store per range in
+                                                     the provided datacenter.
+``'replication_factor'``               int    4.0    The number of replicas to use as a default
+                                                     per datacenter if not specifically provided.
+                                                     Note that this always defers to existing
+                                                     definitions or explicit datacenter settings.
+                                                     For example, to have three replicas per
+                                                     datacenter, supply this with a value of 3.
+===================================== ====== ====== =============================================
+
+Note that when ``ALTER`` ing keyspaces and supplying ``replication_factor``,
+auto-expansion will only *add* new datacenters for safety, it will not alter
+existing datacenters or remove any even if they are no longer in the cluster.
+If you want to remove datacenters while still supplying ``replication_factor``,
+explicitly zero out the datacenter you want to have zero replicas.
+
+An example of auto-expanding datacenters with two datacenters: ``DC1`` and ``DC2``::
+
+    CREATE KEYSPACE excalibur
+        WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor' : 3}
+
+    DESCRIBE KEYSPACE excalibur
+        CREATE KEYSPACE excalibur WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1': '3', 'DC2': '3'} AND durable_writes = true;
+
+
+An example of auto-expanding and overriding a datacenter::
+
+    CREATE KEYSPACE excalibur
+        WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor' : 3, 'DC2': 2}
+
+    DESCRIBE KEYSPACE excalibur
+        CREATE KEYSPACE excalibur WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1': '3', 'DC2': '2'} AND durable_writes = true;
+
+An example that excludes a datacenter while using ``replication_factor``::
+
+    CREATE KEYSPACE excalibur
+        WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor' : 3, 'DC2': 0} ;
+
+    DESCRIBE KEYSPACE excalibur
+        CREATE KEYSPACE excalibur WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1': '3'} AND durable_writes = true;
+
+If :ref:`transient replication <transient-replication>` has been enabled, transient replicas can be configured for both
+SimpleStrategy and NetworkTopologyStrategy by defining replication factors in the format ``'<total_replicas>/<transient_replicas>'``
+
+For instance, this keyspace will have 3 replicas in DC1, 1 of which is transient, and 5 replicas in DC2, 2 of which are transient::
+
+    CREATE KEYSPACE some_keysopace
+               WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1' : '3/1'', 'DC2' : '5/2'};
 
 .. _use-statement:
 
@@ -131,7 +199,7 @@ An ``ALTER KEYSPACE`` statement allows to modify the options of a keyspace:
 For instance::
 
     ALTER KEYSPACE Excelsior
-              WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 4};
+        WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 4};
 
 The supported options are the same than for :ref:`creating a keyspace <create-keyspace-statement>`.
 
@@ -455,6 +523,9 @@ A table supports the following options:
 | ``speculative_retry``          | *simple* | 99PERCENTILE| :ref:`Speculative retry options                           |
 |                                |          |             | <speculative-retry-options>`.                             |
 +--------------------------------+----------+-------------+-----------------------------------------------------------+
+| ``additional_write_policy``    | *simple* | 99PERCENTILE| :ref:`Speculative retry options                           |
+|                                |          |             | <speculative-retry-options>`.                             |
++--------------------------------+----------+-------------+-----------------------------------------------------------+
 | ``gc_grace_seconds``           | *simple* | 864000      | Time to wait before garbage collecting tombstones         |
 |                                |          |             | (deletion markers).                                       |
 +--------------------------------+----------+-------------+-----------------------------------------------------------+
@@ -474,6 +545,8 @@ A table supports the following options:
 +--------------------------------+----------+-------------+-----------------------------------------------------------+
 | ``memtable_flush_period_in_ms``| *simple* | 0           | Time (in ms) before Cassandra flushes memtables to disk.  |
 +--------------------------------+----------+-------------+-----------------------------------------------------------+
+| ``read_repair``                | *simple* | BLOCKING    | Sets read repair behavior (see below)                     |
++--------------------------------+----------+-------------+-----------------------------------------------------------+
 
 .. _speculative-retry-options:
 
@@ -483,7 +556,8 @@ Speculative retry options
 By default, Cassandra read coordinators only query as many replicas as necessary to satisfy
 consistency levels: one for consistency level ``ONE``, a quorum for ``QUORUM``, and so on.
 ``speculative_retry`` determines when coordinators may query additional replicas, which is useful
-when replicas are slow or unresponsive.  The following are legal values (case-insensitive):
+when replicas are slow or unresponsive.  ``additional_write_policy`` specifies the threshold at which
+a cheap quorum write will be upgraded to include transient replicas.  The following are legal values (case-insensitive):
 
 ============================ ======================== =============================================================================
  Format                       Example                  Description
@@ -600,6 +674,36 @@ For instance, to create a table with both a key cache and 10 rows per partition:
     value text,
     PRIMARY KEY (key, value)
     ) WITH caching = {'keys': 'ALL', 'rows_per_partition': 10};
+
+
+Read Repair options
+###################
+
+The ``read_repair`` options configures the read repair behavior to allow tuning for various performance and
+consistency behaviors. Two consistency properties are affected by read repair behavior.
+
+- Monotonic Quorum Reads: Provided by ``BLOCKING``. Monotonic quorum reads prevents reads from appearing to go back
+  in time in some circumstances. When monotonic quorum reads are not provided and a write fails to reach a quorum of
+  replicas, it may be visible in one read, and then disappear in a subsequent read.
+- Write Atomicity: Provided by ``NONE``. Write atomicity prevents reads from returning partially applied writes.
+  Cassandra attempts to provide partition level write atomicity, but since only the data covered by a SELECT statement
+  is repaired by a read repair, read repair can break write atomicity when data is read at a more granular level than it
+  is written. For example read repair can break write atomicity if you write multiple rows to a clustered partition in a
+  batch, but then select a single row by specifying the clustering column in a SELECT statement.
+
+The available read repair settings are:
+
+Blocking
+````````
+The default setting. When ``read_repair`` is set to ``BLOCKING``, and a read repair is triggered, the read will block
+on writes sent to other replicas until the CL is reached by the writes. Provides monotonic quorum reads, but not partition
+level write atomicity
+
+None
+````
+
+When ``read_repair`` is set to ``NONE``, the coordinator will reconcile any differences between replicas, but will not
+attempt to repair them. Provides partition level write atomicity, but not monotonic quorum reads.
 
 
 Other considerations:

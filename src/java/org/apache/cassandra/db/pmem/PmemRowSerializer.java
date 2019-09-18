@@ -183,7 +183,7 @@ public class PmemRowSerializer extends UnfilteredSerializer
         LivenessInfo pkLiveness = row.primaryKeyLivenessInfo();
         Row.Deletion deletion = row.deletion();
         boolean hasComplexDeletion = row.hasComplexDeletion();
-        boolean hasAllColumns = (row.size() == headerColumns.size());
+        boolean hasAllColumns = (row.columnCount() == headerColumns.size());
         boolean hasExtendedFlags = hasExtendedFlags(row);
 
         if (isStatic)
@@ -262,7 +262,7 @@ public class PmemRowSerializer extends UnfilteredSerializer
 
 
         if ((flags & HAS_ALL_COLUMNS) == 0)
-            Columns.serializer.serializeSubset(Collections2.transform(row, ColumnData::column), headerColumns, out);
+            Columns.serializer.serializeSubset(row.columns(), headerColumns, out);
 
         SearchIterator<ColumnMetadata, ColumnMetadata> si = headerColumns.iterator();
 
@@ -374,7 +374,7 @@ public class PmemRowSerializer extends UnfilteredSerializer
         LivenessInfo pkLiveness = row.primaryKeyLivenessInfo();
         Row.Deletion deletion = row.deletion();
         boolean hasComplexDeletion = row.hasComplexDeletion();
-        boolean hasAllColumns = (row.size() == headerColumns.size());
+        boolean hasAllColumns = (row.columnCount() == headerColumns.size());
 
         if (!pkLiveness.isEmpty())
             size += header.timestampSerializedSize(pkLiveness.timestamp());
@@ -387,7 +387,7 @@ public class PmemRowSerializer extends UnfilteredSerializer
             size += header.deletionTimeSerializedSize(deletion.time());
 
         if (!hasAllColumns)
-            size += Columns.serializer.serializedSubsetSize(Collections2.transform(row, ColumnData::column), header.columns(isStatic));
+            size += Columns.serializer.serializedSubsetSize(row.columns(), header.columns(isStatic));
 
         SearchIterator<ColumnMetadata, ColumnMetadata> si = headerColumns.iterator();
         for (ColumnData data : row)

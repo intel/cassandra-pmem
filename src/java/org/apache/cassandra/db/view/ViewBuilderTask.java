@@ -23,10 +23,13 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Objects;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.PeekingIterator;
 import com.google.common.util.concurrent.Futures;
@@ -42,6 +45,7 @@ import org.apache.cassandra.db.ReadQuery;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionInfo;
+import org.apache.cassandra.db.compaction.CompactionInfo.Unit;
 import org.apache.cassandra.db.compaction.CompactionInterruptedException;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
@@ -51,6 +55,7 @@ import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.sstable.ReducingKeyIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.service.StorageProxy;
@@ -73,7 +78,8 @@ public class ViewBuilderTask extends CompactionInfo.Holder implements Callable<L
     private volatile boolean isStopped = false;
     private volatile boolean isCompactionInterrupted = false;
 
-    ViewBuilderTask(ColumnFamilyStore baseCfs, View view, Range<Token> range, Token lastToken, long keysBuilt)
+    @VisibleForTesting
+    public ViewBuilderTask(ColumnFamilyStore baseCfs, View view, Range<Token> range, Token lastToken, long keysBuilt)
     {
         this.baseCfs = baseCfs;
         this.view = view;
@@ -83,6 +89,7 @@ public class ViewBuilderTask extends CompactionInfo.Holder implements Callable<L
         this.keysBuilt = keysBuilt;
     }
 
+    @SuppressWarnings("resource")
     private void buildKey(DecoratedKey key)
     {
         ReadQuery selectQuery = view.getReadQuery();
@@ -120,6 +127,15 @@ public class ViewBuilderTask extends CompactionInfo.Holder implements Callable<L
             logger.debug("Starting new view build for range {}", range);
         else
             logger.debug("Resuming view build for range {} from token {} with {} covered keys", range, prevToken, keysBuilt);
+
+        /*
+         * It's possible for view building to start before MV creation got propagated to other nodes. For this reason
+         * we should wait for schema to converge before attempting to send any view mutations to other nodes, or else
+         * face UnknownTableException upon Mutation deserialization on the nodes that haven't processed the schema change.
+         */
+        boolean schemaConverged = Gossiper.instance.waitForSchemaAgreement(10, TimeUnit.SECONDS, () -> this.isStopped);
+        if (!schemaConverged)
+            logger.warn("Failed to get schema to converge before building view {}.{}", baseCfs.keyspace.getName(), view.name);
 
         Function<org.apache.cassandra.db.lifecycle.View, Iterable<SSTableReader>> function;
         function = org.apache.cassandra.db.lifecycle.View.select(SSTableSet.CANONICAL, s -> range.intersects(s.getBounds()));
@@ -182,17 +198,20 @@ public class ViewBuilderTask extends CompactionInfo.Holder implements Callable<L
     @Override
     public CompactionInfo getCompactionInfo()
     {
+        // we don't know the sstables at construction of ViewBuilderTask and we could change this to return once we know the
+        // but since we basically only cancel view builds on truncation where we cancel all compactions anyway, this seems reasonable
+
         // If there's splitter, calculate progress based on last token position
         if (range.left.getPartitioner().splitter().isPresent())
         {
             long progress = prevToken == null ? 0 : Math.round(prevToken.getPartitioner().splitter().get().positionInRange(prevToken, range) * 1000);
-            return new CompactionInfo(baseCfs.metadata(), OperationType.VIEW_BUILD, progress, 1000, "token range parts", compactionId);
+            return CompactionInfo.withoutSSTables(baseCfs.metadata(), OperationType.VIEW_BUILD, progress, 1000, Unit.RANGES, compactionId);
         }
 
         // When there is no splitter, estimate based on number of total keys but
         // take the max with keysBuilt + 1 to avoid having more completed than total
         long keysTotal = Math.max(keysBuilt + 1, baseCfs.estimatedKeysForRange(range));
-        return new CompactionInfo(baseCfs.metadata(), OperationType.VIEW_BUILD, keysBuilt, keysTotal, "keys", compactionId);
+        return CompactionInfo.withoutSSTables(baseCfs.metadata(), OperationType.VIEW_BUILD, keysBuilt, keysTotal, Unit.KEYS, compactionId);
     }
 
     @Override

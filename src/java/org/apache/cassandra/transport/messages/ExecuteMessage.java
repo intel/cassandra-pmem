@@ -17,29 +17,26 @@
  */
 package org.apache.cassandra.transport.messages;
 
-import java.util.UUID;
-
 import com.google.common.collect.ImmutableMap;
-import io.netty.buffer.ByteBuf;
 
+import io.netty.buffer.ByteBuf;
+import org.apache.cassandra.audit.AuditLogEntry;
+import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryHandler;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.ResultSet;
-import org.apache.cassandra.cql3.statements.BatchStatement;
-import org.apache.cassandra.cql3.statements.ModificationStatement;
-import org.apache.cassandra.cql3.statements.ParsedStatement;
-import org.apache.cassandra.cql3.statements.UpdateStatement;
-import org.apache.cassandra.db.fullquerylog.FullQueryLogger;
 import org.apache.cassandra.exceptions.PreparedQueryNotFoundException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.transport.*;
+import org.apache.cassandra.transport.CBUtil;
+import org.apache.cassandra.transport.Message;
+import org.apache.cassandra.transport.ProtocolException;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.MD5Digest;
-import org.apache.cassandra.utils.UUIDGen;
 
 public class ExecuteMessage extends Message.Request
 {
@@ -107,73 +104,43 @@ public class ExecuteMessage extends Message.Request
         this.resultMetadataId = resultMetadataId;
     }
 
-    public Message.Response execute(QueryState state, long queryStartNanoTime)
+    @Override
+    protected boolean isTraceable()
     {
+        return true;
+    }
+
+    @Override
+    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
+    {
+        AuditLogManager auditLogManager = AuditLogManager.getInstance();
+
         try
         {
             QueryHandler handler = ClientState.getCQLQueryHandler();
-            ParsedStatement.Prepared prepared = handler.getPrepared(statementId);
+            QueryHandler.Prepared prepared = handler.getPrepared(statementId);
             if (prepared == null)
                 throw new PreparedQueryNotFoundException(statementId);
 
-            options.prepare(prepared.boundNames);
             CQLStatement statement = prepared.statement;
+            options.prepare(statement.getBindVariables());
 
             if (options.getPageSize() == 0)
                 throw new ProtocolException("The page size cannot be 0");
 
-            UUID tracingId = null;
-            if (isTracingRequested())
-            {
-                tracingId = UUIDGen.getTimeUUID();
-                state.prepareTracingSession(tracingId);
-            }
-
-            if (state.traceNextQuery())
-            {
-                state.createTracingSession(getCustomPayload());
-
-                ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
-                if (options.getPageSize() > 0)
-                    builder.put("page_size", Integer.toString(options.getPageSize()));
-                if(options.getConsistency() != null)
-                    builder.put("consistency_level", options.getConsistency().name());
-                if(options.getSerialConsistency() != null)
-                    builder.put("serial_consistency_level", options.getSerialConsistency().name());
-                builder.put("query", prepared.rawCQLStatement);
-
-                for(int i=0;i<prepared.boundNames.size();i++)
-                {
-                    ColumnSpecification cs = prepared.boundNames.get(i);
-                    String boundName = cs.name.toString();
-                    String boundValue = cs.type.asCQL3Type().toCQLLiteral(options.getValues().get(i), options.getProtocolVersion());
-                    if ( boundValue.length() > 1000 )
-                    {
-                        boundValue = boundValue.substring(0, 1000) + "...'";
-                    }
-
-                    //Here we prefix boundName with the index to avoid possible collission in builder keys due to
-                    //having multiple boundValues for the same variable
-                    builder.put("bound_var_" + Integer.toString(i) + "_" + boundName, boundValue);
-                }
-
-                Tracing.instance.begin("Execute CQL3 prepared query", state.getClientAddress(), builder.build());
-            }
+            if (traceRequest)
+                traceQuery(state, prepared);
 
             // Some custom QueryHandlers are interested by the bound names. We provide them this information
             // by wrapping the QueryOptions.
-            QueryOptions queryOptions = QueryOptions.addColumnSpecifications(options, prepared.boundNames);
-            boolean fqlEnabled = FullQueryLogger.instance.enabled();
-            long fqlTime = 0;
-            if (fqlEnabled)
-            {
-                fqlTime = System.currentTimeMillis();
-            }
+            QueryOptions queryOptions = QueryOptions.addColumnSpecifications(options, prepared.statement.getBindVariables());
+
+            long requestStartTime = auditLogManager.isLoggingEnabled() ? System.currentTimeMillis() : 0L;
+
             Message.Response response = handler.processPrepared(statement, state, queryOptions, getCustomPayload(), queryStartNanoTime);
-            if (fqlEnabled)
-            {
-                FullQueryLogger.instance.logQuery(prepared.rawCQLStatement, options, fqlTime);
-            }
+
+            if (auditLogManager.isLoggingEnabled())
+                logSuccess(state, prepared, requestStartTime);
 
             if (response instanceof ResultMessage.Rows)
             {
@@ -205,25 +172,90 @@ public class ExecuteMessage extends Message.Request
                 }
             }
 
-            if (tracingId != null)
-                response.setTracingId(tracingId);
-
             return response;
         }
         catch (Exception e)
         {
+            if (auditLogManager.isAuditingEnabled())
+                logException(state, e);
             JVMStabilityInspector.inspectThrowable(e);
             return ErrorMessage.fromException(e);
         }
-        finally
+    }
+
+    private void traceQuery(QueryState state, QueryHandler.Prepared prepared)
+    {
+        ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
+        if (options.getPageSize() > 0)
+            builder.put("page_size", Integer.toString(options.getPageSize()));
+        if (options.getConsistency() != null)
+            builder.put("consistency_level", options.getConsistency().name());
+        if (options.getSerialConsistency() != null)
+            builder.put("serial_consistency_level", options.getSerialConsistency().name());
+
+        builder.put("query", prepared.rawCQLStatement);
+
+        for (int i = 0; i < prepared.statement.getBindVariables().size(); i++)
         {
-            Tracing.instance.stopSession();
+            ColumnSpecification cs = prepared.statement.getBindVariables().get(i);
+            String boundName = cs.name.toString();
+            String boundValue = cs.type.asCQL3Type().toCQLLiteral(options.getValues().get(i), options.getProtocolVersion());
+            if (boundValue.length() > 1000)
+                boundValue = boundValue.substring(0, 1000) + "...'";
+
+            //Here we prefix boundName with the index to avoid possible collission in builder keys due to
+            //having multiple boundValues for the same variable
+            builder.put("bound_var_" + i + '_' + boundName, boundValue);
+        }
+
+        Tracing.instance.begin("Execute CQL3 prepared query", state.getClientAddress(), builder.build());
+    }
+
+    private void logSuccess(QueryState state, QueryHandler.Prepared prepared, long requestStartTime)
+    {
+        AuditLogEntry entry =
+            new AuditLogEntry.Builder(state)
+                             .setType(prepared.statement.getAuditLogContext().auditLogEntryType)
+                             .setOperation(prepared.rawCQLStatement)
+                             .setTimestamp(requestStartTime)
+                             .setScope(prepared.statement)
+                             .setKeyspace(state, prepared.statement)
+                             .setOptions(options)
+                             .build();
+        AuditLogManager.getInstance().log(entry);
+    }
+
+    private void logException(QueryState state, Exception e)
+    {
+        if (e instanceof PreparedQueryNotFoundException)
+        {
+            AuditLogEntry entry =
+                new AuditLogEntry.Builder(state)
+                                 .setOperation(toString())
+                                 .setOptions(options)
+                                 .build();
+            AuditLogManager.getInstance().log(entry, e);
+            return;
+        }
+
+        QueryHandler.Prepared prepared = ClientState.getCQLQueryHandler().getPrepared(statementId);
+        if (prepared != null)
+        {
+            AuditLogEntry entry =
+                new AuditLogEntry.Builder(state)
+                                 .setOperation(toString())
+                                 .setType(prepared.statement.getAuditLogContext().auditLogEntryType)
+                                 .setScope(prepared.statement)
+                                 .setKeyspace(state, prepared.statement)
+                                 .setOptions(options)
+                                 .build();
+            AuditLogManager.getInstance().log(entry, e);
         }
     }
 
     @Override
     public String toString()
     {
-        return "EXECUTE " + statementId + " with " + options.getValues().size() + " values at consistency " + options.getConsistency();
+        return String.format("EXECUTE %s with %d values at consistency %s", statementId, options.getValues().size(), options.getConsistency());
     }
 }

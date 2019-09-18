@@ -94,19 +94,14 @@ public class ARTree {
                 long old = ((Leaf)node).getValue();
                 long newVal = merge.apply(value,old);
                 if (newVal != old) ((Leaf)node).setValue(newVal);
-                //leaf.free();
                 return;
             }
             long newVal = merge.apply(value, 0L);
-            //if (newVal != old) leaf.setValue(newVal);
-            //InternalNode newNode = new Node4(this.heap);
             InternalNode newNode;
             int i = 0;
             for (; i < (key.length-depth) && i < prefix.length && key[i+depth] == prefix[i]; i++) {
                 newPrefix[i] = key[i+depth];
             }
-            //newNode.initPrefixLength(i);
-            //newNode.initPrefix(newPrefix);
 
             depth += i;
 
@@ -114,18 +109,6 @@ public class ARTree {
 
             int prefixLength = key.length - depth - 1;
             Node newChild = SimpleLeaf.create(this.heap, key, depth + 1, prefixLength, newVal);
-            /*Node newChild = leaf;
-            if (prefixLength > Node.MAX_PREFIX_LENGTH) {
-                newChild = leaf.prependNodes(key, depth + 1, prefixLength);
-            } else {
-                leaf.updatePrefix(key, depth + 1, prefixLength);
-            }*/
-
-            /*if (depth == key.length) newNode.addBlankRadixChild(leaf);
-            else newNode.addChild(key[depth], newChild);
-
-            if (i == prefix.length) newNode.addBlankRadixChild((Leaf)node);
-            else newNode.addChild(prefix[i], node);*/
 
             if (depth == key.length) newNode = new Node4(this.heap, newPrefix, i, true, newChild, (byte)0, node, prefix[i]);
             else if (i == prefix.length) newNode = new Node4(this.heap, newPrefix, i, true, (Leaf)node, (byte)0, newChild, key[depth]);
@@ -139,33 +122,17 @@ public class ARTree {
         InternalNode intNode = (InternalNode)node;
         int matchedLength = intNode.checkPrefix(key, depth);
         if (matchedLength != intNode.getPrefixLength()) {
-            //insert new internal node and upate prefix
-            //InternalNode newNode = new Node4(this.heap);
             InternalNode newNode;
-            //leaf.setValue(merge.apply(value,0L));
             long leafVal = merge.apply(value, 0L);
             int i = 0;
             for (; i < matchedLength; i++) {
                 newPrefix[i] = prefix[i];
             }
-            //newNode.initPrefixLength(matchedLength);
-            //newNode.initPrefix(newPrefix);
 
             intNode.updatePrefix(prefix, i + 1, intNode.getPrefixLength() - i - 1);
 
             int prefixLength = key.length - depth - i - 1;
             Node newChild = SimpleLeaf.create(this.heap, key, depth + i + 1, prefixLength, leafVal);
-            /*Node newChild = leaf;
-            if (prefixLength > Node.MAX_PREFIX_LENGTH) {
-                newChild = leaf.prependNodes(key, depth + i + 1, prefixLength);
-            } else {
-                leaf.updatePrefix(key, depth + i + 1, prefixLength);
-            }*/
-
-            /*if (depth + i == key.length) newNode.addBlankRadixChild(leaf);
-            else newNode.addChild(key[depth + i], newChild);
-
-            newNode.addChild(prefix[i], node);*/
 
             if (depth + i == key.length) newNode = new Node4(this.heap, newPrefix, matchedLength, true, newChild, (byte)0, node, prefix[i]);
             else newNode = new Node4(this.heap, newPrefix, matchedLength, false, newChild, key[depth + i], node, prefix[i]);
@@ -185,18 +152,14 @@ public class ARTree {
                 if (old != newVal) child.setValue(newVal);
             }
             else{
-                //long old = leaf.getValue();
                 long newVal = merge.apply(value, 0L);
-                //if (old != newVal) leaf.setValue(newVal);
                 SimpleLeaf leaf = new SimpleLeaf(this.heap, newVal);
                 if (!intNode.addBlankRadixChild(leaf)) {
                     InternalNode newNode = intNode.grow(leaf, Optional.empty());
                     ((InternalNode)parent).putChildAtIndex(replaceIndex, newNode);
-                    //newNode.addBlankRadixChild(leaf);
                     intNode.free();
                 }
             }
-            //leaf.free();
             // no need to update prefix for a blank radix child - it has no prefix
             return;
         }
@@ -204,25 +167,16 @@ public class ARTree {
         int childIndex = intNode.findChildIndex(key[depth]);
         Node next = intNode.getChildAtIndex(childIndex);
         if (next != null) {
-            //insert(node, next, leaf, key, value, depth + 1, childIndex, merge);
             insert(node, next, key, value, depth + 1, childIndex, merge);
         } else {
             // found insertion point. insert leaf
             int prefixLength = key.length - depth - 1;
-            //leaf.setValue(merge.apply(value,0L));
             long leafVal = merge.apply(value, 0L);
             Node newChild = SimpleLeaf.create(this.heap, key, depth + 1, prefixLength, leafVal);
-            /*Node newChild = leaf;
-            if (prefixLength > Node.MAX_PREFIX_LENGTH) {
-                newChild = leaf.prependNodes(key, depth + 1, prefixLength);
-            } else {
-                leaf.updatePrefix(key, depth + 1, prefixLength);
-            }*/
             if (!intNode.addChild(key[depth], newChild)) {
                 InternalNode newNode = intNode.grow(newChild, Optional.of(key[depth]));
                 if (parent == root) { ((Root)parent).addChild(newNode); }
                 else ((InternalNode)parent).putChildAtIndex(replaceIndex, newNode);
-                //newNode.addChild(key[depth], newChild);
                 intNode.free();
             }
         }

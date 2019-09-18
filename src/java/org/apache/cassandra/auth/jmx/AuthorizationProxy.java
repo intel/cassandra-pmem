@@ -33,7 +33,6 @@ import javax.management.ObjectName;
 import javax.security.auth.Subject;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,7 +52,7 @@ import org.apache.cassandra.service.StorageService;
  *
  * Because an ObjectName may contain wildcards, meaning it represents a set of individual MBeans,
  * JMX resources don't fit well with the hierarchical approach modelled by other IResource
- * implementations and utilised by ClientState::ensureHasPermission etc. To enable grants to use
+ * implementations and utilised by ClientState::ensurePermission etc. To enable grants to use
  * pattern-type ObjectNames, this class performs its own custom matching and filtering of resources
  * rather than pushing that down to the configured IAuthorizer. To that end, during authorization
  * it pulls back all permissions for the active subject, filtering them to retain only grants on
@@ -490,11 +489,6 @@ public class AuthorizationProxy implements InvocationHandler
                   DatabaseDescriptor::getPermissionsCacheMaxEntries,
                   AuthorizationProxy::loadPermissions,
                   () -> true);
-        }
-
-        public Set<PermissionDetails> get(RoleResource roleResource)
-        {
-            return super.get(roleResource);
         }
     }
 }

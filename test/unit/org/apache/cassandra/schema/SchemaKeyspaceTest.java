@@ -26,21 +26,24 @@ import java.util.Set;
 
 import com.google.common.collect.ImmutableMap;
 
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.cql3.statements.CreateTableStatement;
+import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.cql3.QueryProcessor.executeOnceInternal;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -95,6 +98,15 @@ public class SchemaKeyspaceTest
         assertEquals(extensions, metadata.params.extensions);
     }
 
+    @Test
+    public void testReadRepair()
+    {
+        createTable("ks", "CREATE TABLE tbl (a text primary key, b int, c int) WITH read_repair='none'");
+        TableMetadata metadata = Schema.instance.getTableMetadata("ks", "tbl");
+        Assert.assertEquals(ReadRepairStrategy.NONE, metadata.params.readRepair);
+
+    }
+
     private static void updateTable(String keyspace, TableMetadata oldTable, TableMetadata newTable)
     {
         KeyspaceMetadata ksm = Schema.instance.getKeyspaceInstance(keyspace).getMetadata();
@@ -133,5 +145,33 @@ public class SchemaKeyspaceTest
 
         assertEquals(metadata.params, params);
         assertEquals(new HashSet<>(metadata.columns()), columns);
+    }
+
+    @Test(expected = SchemaKeyspace.MissingColumns.class)
+    public void testSchemaNoPartition()
+    {
+        String testKS = "test_schema_no_partition";
+        String testTable = "invalid_table";
+        SchemaLoader.createKeyspace(testKS,
+                                    KeyspaceParams.simple(1),
+                                    SchemaLoader.standardCFMD(testKS, testTable));
+        // Delete partition column in the schema
+        String query = String.format("DELETE FROM %s.%s WHERE keyspace_name=? and table_name=? and column_name=?", SchemaConstants.SCHEMA_KEYSPACE_NAME, SchemaKeyspace.COLUMNS);
+        executeOnceInternal(query, testKS, testTable, "key");
+        SchemaKeyspace.fetchNonSystemKeyspaces();
+    }
+
+    @Test(expected = SchemaKeyspace.MissingColumns.class)
+    public void testSchemaNoColumn()
+    {
+        String testKS = "test_schema_no_Column";
+        String testTable = "invalid_table";
+        SchemaLoader.createKeyspace(testKS,
+                                    KeyspaceParams.simple(1),
+                                    SchemaLoader.standardCFMD(testKS, testTable));
+        // Delete all colmns in the schema
+        String query = String.format("DELETE FROM %s.%s WHERE keyspace_name=? and table_name=?", SchemaConstants.SCHEMA_KEYSPACE_NAME, SchemaKeyspace.COLUMNS);
+        executeOnceInternal(query, testKS, testTable);
+        SchemaKeyspace.fetchNonSystemKeyspaces();
     }
 }

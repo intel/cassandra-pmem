@@ -22,11 +22,11 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileAttribute;
 import java.util.*;
 import java.util.concurrent.*;
 
 import com.google.common.collect.Sets;
-import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -39,6 +39,8 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.lifecycle.SSTableSet;
+import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.dht.IPartitioner;
@@ -51,14 +53,13 @@ import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.MmappedRegions;
 import org.apache.cassandra.schema.CachingParams;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FilterFactory;
-import static org.apache.cassandra.cql3.QueryProcessor.executeInternal;
 
+import static org.apache.cassandra.cql3.QueryProcessor.executeInternal;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -381,7 +382,7 @@ public class SSTableReaderTest
         long bloomModified = Files.getLastModifiedTime(bloomPath).toMillis();
         long summaryModified = Files.getLastModifiedTime(summaryPath).toMillis();
 
-        Thread.sleep(TimeUnit.MILLISECONDS.toMillis(1000)); // sleep to ensure modified time will be different
+        TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
 
         // Offline tests
         // check that bloomfilter/summary ARE NOT regenerated
@@ -428,7 +429,7 @@ public class SSTableReaderTest
         summaryModified = Files.getLastModifiedTime(summaryPath).toMillis();
         summaryFile.delete();
 
-        Thread.sleep(TimeUnit.MILLISECONDS.toMillis(1000)); // sleep to ensure modified time will be different
+        TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
         bloomModified = Files.getLastModifiedTime(bloomPath).toMillis();
 
         target = SSTableReader.open(desc, components, store.metadata);
@@ -445,7 +446,7 @@ public class SSTableReaderTest
         summaryModified = Files.getLastModifiedTime(summaryPath).toMillis();
         target = SSTableReader.open(desc, components, store.metadata, false, false);
 
-        Thread.sleep(TimeUnit.MILLISECONDS.toMillis(10)); // sleep to ensure modified time will be different
+        TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
         assertEquals(bloomModified, Files.getLastModifiedTime(bloomPath).toMillis());
         assertEquals(summaryModified, Files.getLastModifiedTime(summaryPath).toMillis());
 
@@ -692,5 +693,91 @@ public class SSTableReaderTest
     private DecoratedKey k(int i)
     {
         return new BufferDecoratedKey(t(i), ByteBufferUtil.bytes(String.valueOf(i)));
+    }
+
+    @Test(expected = RuntimeException.class)
+    public void testMoveAndOpenLiveSSTable()
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        SSTableReader sstable = getNewSSTable(cfs);
+        Descriptor notLiveDesc = new Descriptor(new File("/tmp"), "", "", 0);
+        SSTableReader.moveAndOpenSSTable(cfs, sstable.descriptor, notLiveDesc, sstable.components);
+    }
+
+    @Test(expected = RuntimeException.class)
+    public void testMoveAndOpenLiveSSTable2()
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        SSTableReader sstable = getNewSSTable(cfs);
+        Descriptor notLiveDesc = new Descriptor(new File("/tmp"), "", "", 0);
+        SSTableReader.moveAndOpenSSTable(cfs, notLiveDesc, sstable.descriptor, sstable.components);
+    }
+
+    @Test
+    public void testMoveAndOpenSSTable() throws IOException
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        SSTableReader sstable = getNewSSTable(cfs);
+        cfs.clearUnsafe();
+        sstable.selfRef().release();
+        File tmpdir = Files.createTempDirectory("testMoveAndOpen").toFile();
+        tmpdir.deleteOnExit();
+        Descriptor notLiveDesc = new Descriptor(tmpdir, sstable.descriptor.ksname, sstable.descriptor.cfname, 100);
+        // make sure the new directory is empty and that the old files exist:
+        for (Component c : sstable.components)
+        {
+            File f = new File(notLiveDesc.filenameFor(c));
+            assertFalse(f.exists());
+            assertTrue(new File(sstable.descriptor.filenameFor(c)).exists());
+        }
+        SSTableReader.moveAndOpenSSTable(cfs, sstable.descriptor, notLiveDesc, sstable.components);
+        // make sure the files were moved:
+        for (Component c : sstable.components)
+        {
+            File f = new File(notLiveDesc.filenameFor(c));
+            assertTrue(f.exists());
+            assertTrue(f.toString().contains("-100-"));
+            f.deleteOnExit();
+            assertFalse(new File(sstable.descriptor.filenameFor(c)).exists());
+        }
+    }
+
+
+
+    private SSTableReader getNewSSTable(ColumnFamilyStore cfs)
+    {
+
+        Set<SSTableReader> before = cfs.getLiveSSTables();
+        for (int j = 0; j < 100; j += 2)
+        {
+            new RowUpdateBuilder(cfs.metadata(), j, String.valueOf(j))
+            .clustering("0")
+            .add("val", ByteBufferUtil.EMPTY_BYTE_BUFFER)
+            .build()
+            .applyUnsafe();
+        }
+        cfs.forceBlockingFlush();
+        return Sets.difference(cfs.getLiveSSTables(), before).iterator().next();
+    }
+
+    @Test
+    public void testGetApproximateKeyCount() throws InterruptedException
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        cfs.discardSSTables(System.currentTimeMillis()); //Cleaning all existing SSTables.
+        getNewSSTable(cfs);
+
+        try (ColumnFamilyStore.RefViewFragment viewFragment1 = cfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
+        {
+            cfs.discardSSTables(System.currentTimeMillis());
+
+            TimeUnit.MILLISECONDS.sleep(1000); //Giving enough time to clear files.
+            List<SSTableReader> sstables = new ArrayList<>(viewFragment1.sstables);
+            assertEquals(50, SSTableReader.getApproximateKeyCount(sstables));
+        }
     }
 }

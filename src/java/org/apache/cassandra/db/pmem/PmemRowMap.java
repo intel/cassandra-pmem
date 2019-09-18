@@ -137,7 +137,7 @@ public class PmemRowMap
             throw new IOError(e);
         }
 
-        return(Rows.merge(currentRow, newRow, FBUtilities.nowInSeconds()));
+        return(Rows.merge(currentRow, newRow));
     }
 
     Long merge(Object newRow, Long mb)

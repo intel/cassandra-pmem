@@ -21,6 +21,7 @@ package org.apache.cassandra.gms;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
@@ -42,11 +43,14 @@ import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.service.StorageService;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 public class GossiperTest
 {
     static
     {
+        System.setProperty(Gossiper.Props.DISABLE_THREAD_VALIDATION, "true");
         DatabaseDescriptor.daemonInitialization();
     }
 
@@ -74,36 +78,159 @@ public class GossiperTest
     }
 
     @Test
+    public void testHaveVersion3Nodes() throws Exception
+    {
+        VersionedValue.VersionedValueFactory factory = new VersionedValue.VersionedValueFactory(null);
+        EndpointState es = new EndpointState(null);
+        es.addApplicationState(ApplicationState.RELEASE_VERSION, factory.releaseVersion("4.0-SNAPSHOT"));
+        Gossiper.instance.endpointStateMap.put(InetAddressAndPort.getByName("127.0.0.1"), es);
+        Gossiper.instance.liveEndpoints.add(InetAddressAndPort.getByName("127.0.0.1"));
+
+
+        es = new EndpointState(null);
+        es.addApplicationState(ApplicationState.RELEASE_VERSION, factory.releaseVersion("3.11.3"));
+        Gossiper.instance.endpointStateMap.put(InetAddressAndPort.getByName("127.0.0.2"), es);
+        Gossiper.instance.liveEndpoints.add(InetAddressAndPort.getByName("127.0.0.2"));
+
+
+        es = new EndpointState(null);
+        es.addApplicationState(ApplicationState.RELEASE_VERSION, factory.releaseVersion("3.0.0"));
+        Gossiper.instance.endpointStateMap.put(InetAddressAndPort.getByName("127.0.0.3"), es);
+        Gossiper.instance.liveEndpoints.add(InetAddressAndPort.getByName("127.0.0.3"));
+
+
+        assertTrue(Gossiper.instance.haveMajorVersion3NodesSupplier.get());
+
+        Gossiper.instance.endpointStateMap.remove(InetAddressAndPort.getByName("127.0.0.2"));
+        Gossiper.instance.liveEndpoints.remove(InetAddressAndPort.getByName("127.0.0.2"));
+
+
+        assertTrue(Gossiper.instance.haveMajorVersion3NodesSupplier.get());
+
+        Gossiper.instance.endpointStateMap.remove(InetAddressAndPort.getByName("127.0.0.3"));
+        Gossiper.instance.liveEndpoints.add(InetAddressAndPort.getByName("127.0.0.3"));
+
+        assertFalse(Gossiper.instance.haveMajorVersion3NodesSupplier.get());
+
+    }
+
+    @Test
     public void testLargeGenerationJump() throws UnknownHostException, InterruptedException
     {
         Util.createInitialRing(ss, partitioner, endpointTokens, keyTokens, hosts, hostIds, 2);
-        InetAddressAndPort remoteHostAddress = hosts.get(1);
+        try
+        {
+            InetAddressAndPort remoteHostAddress = hosts.get(1);
 
-        EndpointState initialRemoteState = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress);
-        HeartBeatState initialRemoteHeartBeat = initialRemoteState.getHeartBeatState();
+            EndpointState initialRemoteState = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress);
+            HeartBeatState initialRemoteHeartBeat = initialRemoteState.getHeartBeatState();
 
-        //Util.createInitialRing should have initialized remoteHost's HeartBeatState's generation to 1
-        assertEquals(initialRemoteHeartBeat.getGeneration(), 1);
+            //Util.createInitialRing should have initialized remoteHost's HeartBeatState's generation to 1
+            assertEquals(initialRemoteHeartBeat.getGeneration(), 1);
 
-        HeartBeatState proposedRemoteHeartBeat = new HeartBeatState(initialRemoteHeartBeat.getGeneration() + Gossiper.MAX_GENERATION_DIFFERENCE + 1);
-        EndpointState proposedRemoteState = new EndpointState(proposedRemoteHeartBeat);
+            HeartBeatState proposedRemoteHeartBeat = new HeartBeatState(initialRemoteHeartBeat.getGeneration() + Gossiper.MAX_GENERATION_DIFFERENCE + 1);
+            EndpointState proposedRemoteState = new EndpointState(proposedRemoteHeartBeat);
 
-        Gossiper.instance.applyStateLocally(ImmutableMap.of(remoteHostAddress, proposedRemoteState));
+            Gossiper.instance.applyStateLocally(ImmutableMap.of(remoteHostAddress, proposedRemoteState));
 
-        //The generation should have been updated because it isn't over Gossiper.MAX_GENERATION_DIFFERENCE in the future
-        HeartBeatState actualRemoteHeartBeat = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress).getHeartBeatState();
-        assertEquals(proposedRemoteHeartBeat.getGeneration(), actualRemoteHeartBeat.getGeneration());
+            //The generation should have been updated because it isn't over Gossiper.MAX_GENERATION_DIFFERENCE in the future
+            HeartBeatState actualRemoteHeartBeat = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress).getHeartBeatState();
+            assertEquals(proposedRemoteHeartBeat.getGeneration(), actualRemoteHeartBeat.getGeneration());
 
-        //Propose a generation 10 years in the future - this should be rejected.
-        HeartBeatState badProposedRemoteHeartBeat = new HeartBeatState((int) (System.currentTimeMillis()/1000) + Gossiper.MAX_GENERATION_DIFFERENCE * 10);
-        EndpointState badProposedRemoteState = new EndpointState(badProposedRemoteHeartBeat);
+            //Propose a generation 10 years in the future - this should be rejected.
+            HeartBeatState badProposedRemoteHeartBeat = new HeartBeatState((int) (System.currentTimeMillis() / 1000) + Gossiper.MAX_GENERATION_DIFFERENCE * 10);
+            EndpointState badProposedRemoteState = new EndpointState(badProposedRemoteHeartBeat);
 
-        Gossiper.instance.applyStateLocally(ImmutableMap.of(remoteHostAddress, badProposedRemoteState));
+            Gossiper.instance.applyStateLocally(ImmutableMap.of(remoteHostAddress, badProposedRemoteState));
 
-        actualRemoteHeartBeat = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress).getHeartBeatState();
+            actualRemoteHeartBeat = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress).getHeartBeatState();
 
-        //The generation should not have been updated because it is over Gossiper.MAX_GENERATION_DIFFERENCE in the future
-        assertEquals(proposedRemoteHeartBeat.getGeneration(), actualRemoteHeartBeat.getGeneration());
+            //The generation should not have been updated because it is over Gossiper.MAX_GENERATION_DIFFERENCE in the future
+            assertEquals(proposedRemoteHeartBeat.getGeneration(), actualRemoteHeartBeat.getGeneration());
+        }
+        finally
+        {
+            // clean up the gossip states
+            Gossiper.instance.endpointStateMap.clear();
+        }
+    }
+
+    int stateChangedNum = 0;
+
+    @Test
+    public void testDuplicatedStateUpdate() throws Exception
+    {
+        VersionedValue.VersionedValueFactory valueFactory =
+            new VersionedValue.VersionedValueFactory(DatabaseDescriptor.getPartitioner());
+
+        Util.createInitialRing(ss, partitioner, endpointTokens, keyTokens, hosts, hostIds, 2);
+        try
+        {
+            InetAddressAndPort remoteHostAddress = hosts.get(1);
+
+            EndpointState initialRemoteState = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress);
+            HeartBeatState initialRemoteHeartBeat = initialRemoteState.getHeartBeatState();
+
+            //Util.createInitialRing should have initialized remoteHost's HeartBeatState's generation to 1
+            assertEquals(initialRemoteHeartBeat.getGeneration(), 1);
+
+            HeartBeatState proposedRemoteHeartBeat = new HeartBeatState(initialRemoteHeartBeat.getGeneration());
+            EndpointState proposedRemoteState = new EndpointState(proposedRemoteHeartBeat);
+
+            final Token token = DatabaseDescriptor.getPartitioner().getRandomToken();
+            VersionedValue tokensValue = valueFactory.tokens(Collections.singletonList(token));
+            proposedRemoteState.addApplicationState(ApplicationState.TOKENS, tokensValue);
+
+            Gossiper.instance.register(
+            new IEndpointStateChangeSubscriber()
+            {
+                public void onJoin(InetAddressAndPort endpoint, EndpointState epState) { }
+
+                public void beforeChange(InetAddressAndPort endpoint, EndpointState currentState, ApplicationState newStateKey, VersionedValue newValue) { }
+
+                public void onChange(InetAddressAndPort endpoint, ApplicationState state, VersionedValue value)
+                {
+                    assertEquals(ApplicationState.TOKENS, state);
+                    stateChangedNum++;
+                }
+
+                public void onAlive(InetAddressAndPort endpoint, EndpointState state) { }
+
+                public void onDead(InetAddressAndPort endpoint, EndpointState state) { }
+
+                public void onRemove(InetAddressAndPort endpoint) { }
+
+                public void onRestart(InetAddressAndPort endpoint, EndpointState state) { }
+            }
+            );
+
+            stateChangedNum = 0;
+            Gossiper.instance.applyStateLocally(ImmutableMap.of(remoteHostAddress, proposedRemoteState));
+            assertEquals(1, stateChangedNum);
+
+            HeartBeatState actualRemoteHeartBeat = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress).getHeartBeatState();
+            assertEquals(proposedRemoteHeartBeat.getGeneration(), actualRemoteHeartBeat.getGeneration());
+
+            // Clone a new HeartBeatState
+            proposedRemoteHeartBeat = new HeartBeatState(initialRemoteHeartBeat.getGeneration(), proposedRemoteHeartBeat.getHeartBeatVersion());
+            proposedRemoteState = new EndpointState(proposedRemoteHeartBeat);
+
+            // Bump the heartbeat version and use the same TOKENS state
+            proposedRemoteHeartBeat.updateHeartBeat();
+            proposedRemoteState.addApplicationState(ApplicationState.TOKENS, tokensValue);
+
+            // The following state change should only update heartbeat without updating the TOKENS state
+            Gossiper.instance.applyStateLocally(ImmutableMap.of(remoteHostAddress, proposedRemoteState));
+            assertEquals(1, stateChangedNum);
+
+            actualRemoteHeartBeat = Gossiper.instance.getEndpointStateForEndpoint(remoteHostAddress).getHeartBeatState();
+            assertEquals(proposedRemoteHeartBeat.getGeneration(), actualRemoteHeartBeat.getGeneration());
+        }
+        finally
+        {
+            // clean up the gossip states
+            Gossiper.instance.endpointStateMap.clear();
+        }
     }
 
     // Note: This test might fail if for some reason the node broadcast address is in 127.99.0.0/16
@@ -136,15 +263,15 @@ public class GossiperTest
         // Check that the new entry was added
         Assert.assertEquals(nextSize, loadedList.size());
         for (InetAddressAndPort a : nextSeeds)
-            Assert.assertTrue(loadedList.contains(a.toString()));
+            assertTrue(loadedList.contains(a.toString()));
 
         // Check that the return value of the reloadSeeds matches the content of the getSeeds call
         // and that they both match the internal contents of the Gossiper seeds list
         Assert.assertEquals(loadedList.size(), gossiper.getSeeds().size());
         for (InetAddressAndPort a : gossiper.seeds)
         {
-            Assert.assertTrue(loadedList.contains(a.toString()));
-            Assert.assertTrue(gossiper.getSeeds().contains(a.toString()));
+            assertTrue(loadedList.contains(a.toString()));
+            assertTrue(gossiper.getSeeds().contains(a.toString()));
         }
 
         // Add a duplicate of the last address to the seed provider list
@@ -157,7 +284,7 @@ public class GossiperTest
         // Check that the number of seed nodes reported hasn't increased
         Assert.assertEquals(uniqueSize, loadedList.size());
         for (InetAddressAndPort a : nextSeeds)
-            Assert.assertTrue(loadedList.contains(a.toString()));
+            assertTrue(loadedList.contains(a.toString()));
 
         // Create a new list that has no overlaps with the previous list
         addr = InetAddressAndPort.getByAddress(InetAddress.getByName("127.99.2.1"));
@@ -176,8 +303,8 @@ public class GossiperTest
         Assert.assertEquals(disjointSize, loadedList.size());
         for (InetAddressAndPort a : disjointSeeds)
         {
-            Assert.assertTrue(gossiper.getSeeds().contains(a.toString()));
-            Assert.assertTrue(loadedList.contains(a.toString()));
+            assertTrue(gossiper.getSeeds().contains(a.toString()));
+            assertTrue(loadedList.contains(a.toString()));
         }
 
         // Set the seed node provider to return an empty list
@@ -187,7 +314,7 @@ public class GossiperTest
         // Check that the in memory seed node list was not modified
         Assert.assertEquals(disjointSize, loadedList.size());
         for (InetAddressAndPort a : disjointSeeds)
-            Assert.assertTrue(loadedList.contains(a.toString()));
+            assertTrue(loadedList.contains(a.toString()));
 
         // Change the seed provider to one that throws an unchecked exception
         DatabaseDescriptor.setSeedProvider(new ErrorSeedProvider());
@@ -199,7 +326,7 @@ public class GossiperTest
         // Check that the in memory seed node list was not modified and the exception was caught
         Assert.assertEquals(disjointSize, gossiper.getSeeds().size());
         for (InetAddressAndPort a : disjointSeeds)
-            Assert.assertTrue(gossiper.getSeeds().contains(a.toString()));
+            assertTrue(gossiper.getSeeds().contains(a.toString()));
     }
 
     static class TestSeedProvider implements SeedProvider

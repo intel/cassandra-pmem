@@ -21,12 +21,11 @@ import java.util.*;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.index.Index;
+import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.SimpleSSTableMultiWriter;
@@ -42,6 +41,7 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
+import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.schema.CompactionParams;
 
 /**
@@ -214,15 +214,15 @@ public abstract class AbstractCompactionStrategy
      * @param originalCandidates The collection to check for blacklisted SSTables
      * @return list of the SSTables with blacklisted ones filtered out
      */
-    public static Iterable<SSTableReader> filterSuspectSSTables(Iterable<SSTableReader> originalCandidates)
+    public static List<SSTableReader> filterSuspectSSTables(Iterable<SSTableReader> originalCandidates)
     {
-        return Iterables.filter(originalCandidates, new Predicate<SSTableReader>()
+        List<SSTableReader> filtered = new ArrayList<>();
+        for (SSTableReader sstable : originalCandidates)
         {
-            public boolean apply(SSTableReader sstable)
-            {
-                return !sstable.isMarkedSuspect();
-            }
-        });
+            if (!sstable.isMarkedSuspect())
+                filtered.add(sstable);
+        }
+        return filtered;
     }
 
 
@@ -280,11 +280,30 @@ public abstract class AbstractCompactionStrategy
 
     public abstract void removeSSTable(SSTableReader sstable);
 
+    public void removeSSTables(Iterable<SSTableReader> removed)
+    {
+        for (SSTableReader sstable : removed)
+            removeSSTable(sstable);
+    }
+
     /**
      * Returns the sstables managed by this strategy instance
      */
     @VisibleForTesting
     protected abstract Set<SSTableReader> getSSTables();
+
+    /**
+     * Called when the metadata has changed for an sstable - for example if the level changed
+     *
+     * Not called when repair status changes (which is also metadata), because this results in the
+     * sstable getting removed from the compaction strategy instance.
+     *
+     * @param oldMetadata
+     * @param sstable
+     */
+    public void metadataChanged(StatsMetadata oldMetadata, SSTableReader sstable)
+    {
+    }
 
     public static class ScannerList implements AutoCloseable
     {
@@ -391,8 +410,8 @@ public abstract class AbstractCompactionStrategy
                 ranges.add(new Range<>(overlap.first.getToken(), overlap.last.getToken()));
             long remainingKeys = keys - sstable.estimatedKeysForRanges(ranges);
             // next, calculate what percentage of columns we have within those keys
-            long columns = sstable.getEstimatedColumnCount().mean() * remainingKeys;
-            double remainingColumnsRatio = ((double) columns) / (sstable.getEstimatedColumnCount().count() * sstable.getEstimatedColumnCount().mean());
+            long columns = sstable.getEstimatedCellPerPartitionCount().mean() * remainingKeys;
+            double remainingColumnsRatio = ((double) columns) / (sstable.getEstimatedCellPerPartitionCount().count() * sstable.getEstimatedCellPerPartitionCount().mean());
 
             // return if we still expect to have droppable tombstones in rest of columns
             return remainingColumnsRatio * droppableRatio > tombstoneThreshold;
@@ -510,12 +529,13 @@ public abstract class AbstractCompactionStrategy
                                                        long keyCount,
                                                        long repairedAt,
                                                        UUID pendingRepair,
+                                                       boolean isTransient,
                                                        MetadataCollector meta,
                                                        SerializationHeader header,
                                                        Collection<Index> indexes,
-                                                       LifecycleTransaction txn)
+                                                       LifecycleNewTracker lifecycleNewTracker)
     {
-        return SimpleSSTableMultiWriter.create(descriptor, keyCount, repairedAt, pendingRepair, cfs.metadata, meta, header, indexes, txn);
+        return SimpleSSTableMultiWriter.create(descriptor, keyCount, repairedAt, pendingRepair, isTransient, cfs.metadata, meta, header, indexes, lifecycleNewTracker);
     }
 
     public boolean supportsEarlyOpen()

@@ -20,10 +20,12 @@ package org.apache.cassandra.locator;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.dht.Token;
 
@@ -36,46 +38,60 @@ import org.apache.cassandra.dht.Token;
  */
 public class SimpleStrategy extends AbstractReplicationStrategy
 {
+    private static final String REPLICATION_FACTOR = "replication_factor";
+    private final ReplicationFactor rf;
+
     public SimpleStrategy(String keyspaceName, TokenMetadata tokenMetadata, IEndpointSnitch snitch, Map<String, String> configOptions)
     {
         super(keyspaceName, tokenMetadata, snitch, configOptions);
+        validateOptionsInternal(configOptions);
+        this.rf = ReplicationFactor.fromString(this.configOptions.get(REPLICATION_FACTOR));
     }
 
-    public List<InetAddressAndPort> calculateNaturalEndpoints(Token token, TokenMetadata metadata)
+    public EndpointsForRange calculateNaturalReplicas(Token token, TokenMetadata metadata)
     {
-        int replicas = getReplicationFactor();
-        ArrayList<Token> tokens = metadata.sortedTokens();
-        List<InetAddressAndPort> endpoints = new ArrayList<InetAddressAndPort>(replicas);
+        ArrayList<Token> ring = metadata.sortedTokens();
+        if (ring.isEmpty())
+            return EndpointsForRange.empty(new Range<>(metadata.partitioner.getMinimumToken(), metadata.partitioner.getMinimumToken()));
 
-        if (tokens.isEmpty())
-            return endpoints;
+        Token replicaEnd = TokenMetadata.firstToken(ring, token);
+        Token replicaStart = metadata.getPredecessor(replicaEnd);
+        Range<Token> replicaRange = new Range<>(replicaStart, replicaEnd);
+        Iterator<Token> iter = TokenMetadata.ringIterator(ring, token, false);
+
+        EndpointsForRange.Builder replicas = new EndpointsForRange.Builder(replicaRange, rf.allReplicas);
 
         // Add the token at the index by default
-        Iterator<Token> iter = TokenMetadata.ringIterator(tokens, token, false);
-        while (endpoints.size() < replicas && iter.hasNext())
+        while (replicas.size() < rf.allReplicas && iter.hasNext())
         {
-            InetAddressAndPort ep = metadata.getEndpoint(iter.next());
-            if (!endpoints.contains(ep))
-                endpoints.add(ep);
+            Token tk = iter.next();
+            InetAddressAndPort ep = metadata.getEndpoint(tk);
+            if (!replicas.endpoints().contains(ep))
+                replicas.add(new Replica(ep, replicaRange, replicas.size() < rf.fullReplicas));
         }
-        return endpoints;
+
+        return replicas.build();
     }
 
-    public int getReplicationFactor()
+    public ReplicationFactor getReplicationFactor()
     {
-        return Integer.parseInt(this.configOptions.get("replication_factor"));
+        return rf;
+    }
+
+    private final static void validateOptionsInternal(Map<String, String> configOptions) throws ConfigurationException
+    {
+        if (configOptions.get(REPLICATION_FACTOR) == null)
+            throw new ConfigurationException("SimpleStrategy requires a replication_factor strategy option.");
     }
 
     public void validateOptions() throws ConfigurationException
     {
-        String rf = configOptions.get("replication_factor");
-        if (rf == null)
-            throw new ConfigurationException("SimpleStrategy requires a replication_factor strategy option.");
-        validateReplicationFactor(rf);
+        validateOptionsInternal(configOptions);
+        validateReplicationFactor(configOptions.get(REPLICATION_FACTOR));
     }
 
     public Collection<String> recognizedOptions()
     {
-        return Collections.<String>singleton("replication_factor");
+        return Collections.singleton(REPLICATION_FACTOR);
     }
 }

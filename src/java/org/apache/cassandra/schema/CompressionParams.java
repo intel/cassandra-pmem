@@ -26,9 +26,9 @@ import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableMap;
 
-import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
 
 import org.slf4j.Logger;
@@ -41,6 +41,7 @@ import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.compress.*;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.streaming.messages.StreamMessage;
 
 import static java.lang.String.format;
@@ -54,7 +55,7 @@ public final class CompressionParams
     private static volatile boolean hasLoggedChunkLengthWarning;
     private static volatile boolean hasLoggedCrcCheckChanceWarning;
 
-    public static final int DEFAULT_CHUNK_LENGTH = 65536;
+    public static final int DEFAULT_CHUNK_LENGTH = 1024 * 16;
     public static final double DEFAULT_MIN_COMPRESS_RATIO = 0.0;        // Since pre-4.0 versions do not understand the
                                                                         // new compression parameter we can't use a
                                                                         // different default value.
@@ -84,6 +85,7 @@ public final class CompressionParams
     private final double minCompressRatio;  // In configuration we store min ratio, the input parameter.
     private final ImmutableMap<String, String> otherOptions; // Unrecognized options, can be used by the compressor
 
+    // TODO: deprecated, should now be carefully removed. Doesn't affect schema code as it isn't included in equals() and hashCode()
     private volatile double crcCheckChance = 1.0;
 
     public static CompressionParams fromMap(Map<String, String> opts)
@@ -175,6 +177,17 @@ public final class CompressionParams
     public static CompressionParams lz4(int chunkLength, int maxCompressedLength)
     {
         return new CompressionParams(LZ4Compressor.create(Collections.emptyMap()), chunkLength, maxCompressedLength, calcMinCompressRatio(chunkLength, maxCompressedLength), Collections.emptyMap());
+    }
+
+    public static CompressionParams zstd()
+    {
+        return zstd(DEFAULT_CHUNK_LENGTH);
+    }
+
+    public static CompressionParams zstd(Integer chunkLength)
+    {
+        ZstdCompressor compressor = ZstdCompressor.create(Collections.emptyMap());
+        return new CompressionParams(compressor, chunkLength, Integer.MAX_VALUE, DEFAULT_MIN_COMPRESS_RATIO, Collections.emptyMap());
     }
 
     public CompressionParams(String sstableCompressorClass, Map<String, String> otherOptions, int chunkLength, double minCompressRatio) throws ConfigurationException
@@ -548,20 +561,17 @@ public final class CompressionParams
     public boolean equals(Object obj)
     {
         if (obj == this)
-        {
             return true;
-        }
-        else if (obj == null || obj.getClass() != getClass())
-        {
+
+        if (!(obj instanceof CompressionParams))
             return false;
-        }
 
         CompressionParams cp = (CompressionParams) obj;
-        return new EqualsBuilder()
-            .append(sstableCompressor, cp.sstableCompressor)
-            .append(chunkLength(), cp.chunkLength())
-            .append(otherOptions, cp.otherOptions)
-            .isEquals();
+
+        return Objects.equal(sstableCompressor, cp.sstableCompressor)
+            && chunkLength == cp.chunkLength
+            && otherOptions.equals(cp.otherOptions)
+            && minCompressRatio == cp.minCompressRatio;
     }
 
     @Override
@@ -569,8 +579,9 @@ public final class CompressionParams
     {
         return new HashCodeBuilder(29, 1597)
             .append(sstableCompressor)
-            .append(chunkLength())
+            .append(chunkLength)
             .append(otherOptions)
+            .append(minCompressRatio)
             .toHashCode();
     }
 
@@ -586,7 +597,7 @@ public final class CompressionParams
                 out.writeUTF(entry.getValue());
             }
             out.writeInt(parameters.chunkLength());
-            if (version >= StreamMessage.VERSION_40)
+            if (version >= MessagingService.VERSION_40)
                 out.writeInt(parameters.maxCompressedLength);
             else
                 if (parameters.maxCompressedLength != Integer.MAX_VALUE)
@@ -606,7 +617,7 @@ public final class CompressionParams
             }
             int chunkLength = in.readInt();
             int minCompressRatio = Integer.MAX_VALUE;   // Earlier Cassandra cannot use uncompressed chunks.
-            if (version >= StreamMessage.VERSION_40)
+            if (version >= MessagingService.VERSION_40)
                 minCompressRatio = in.readInt();
 
             CompressionParams parameters;
@@ -631,7 +642,7 @@ public final class CompressionParams
                 size += TypeSizes.sizeof(entry.getValue());
             }
             size += TypeSizes.sizeof(parameters.chunkLength());
-            if (version >= StreamMessage.VERSION_40)
+            if (version >= MessagingService.VERSION_40)
                 size += TypeSizes.sizeof(parameters.maxCompressedLength());
             return size;
         }

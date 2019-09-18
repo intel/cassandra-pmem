@@ -1859,7 +1859,7 @@ public class SelectTest extends CQLTester
         });
 
         // test clutering order
-        createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, PRIMARY KEY ((a, b), c, d)) WITH CLUSTERING ORDER BY (c DESC)");
+        createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, PRIMARY KEY ((a, b), c, d)) WITH CLUSTERING ORDER BY (c DESC, d ASC)");
 
         execute("INSERT INTO %s (a,b,c,d,e) VALUES (11, 11, 13, 14, 15)");
         execute("INSERT INTO %s (a,b,c,d,e) VALUES (11, 11, 14, 17, 18)");
@@ -2415,7 +2415,7 @@ public class SelectTest extends CQLTester
                    row("a", 3));
 
         // compound, first column DESC order
-        createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b, c)) WITH CLUSTERING ORDER BY (b DESC)");
+        createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b, c)) WITH CLUSTERING ORDER BY (b DESC, c ASC)");
 
         execute("INSERT INTO %s (a, b, c) VALUES ('a', 2, 4)");
         execute("INSERT INTO %s (a, b, c) VALUES ('a', 3, 5)");
@@ -3086,4 +3086,77 @@ public class SelectTest extends CQLTester
         }
     }
 
+    @Test // CASSANDRA-14989
+    public void testTokenFctAcceptsValidArguments() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertRowCount(execute("SELECT token(k1, k2) FROM %s"), 1);
+    }
+
+    @Test
+    public void testTokenFctRejectsInvalidColumnName() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertInvalidMessage("Undefined column name ", "SELECT token(s1, k1) FROM %s");
+    }
+
+    @Test
+    public void testTokenFctRejectsInvalidColumnType() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertInvalidMessage("Type error: k2 cannot be passed as argument 0 of function system.token of type uuid",
+                             "SELECT token(k2, k1) FROM %s");
+    }
+
+    @Test
+    public void testTokenFctRejectsInvalidColumnCount() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertInvalidMessage("Invalid number of arguments in call to function system.token: 2 required but 1 provided",
+                             "SELECT token(k1) FROM %s");
+    }
+
+    @Test
+    public void testCreatingUDFWithSameNameAsBuiltin_PrefersCompatibleArgs_SameKeyspace() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        createFunctionOverload(KEYSPACE + ".token", "double",
+                               "CREATE FUNCTION %s (val double) RETURNS null ON null INPUT RETURNS double LANGUAGE java AS 'return 10.0d;'");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertRows(execute("SELECT token(10) FROM %s"), row(10.0d));
+    }
+
+    @Test
+    public void testCreatingUDFWithSameNameAsBuiltin_FullyQualifiedFunctionNameWorks() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        createFunctionOverload(KEYSPACE + ".token", "double",
+                               "CREATE FUNCTION %s (val double) RETURNS null ON null INPUT RETURNS double LANGUAGE java AS 'return 10.0d;'");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertRows(execute("SELECT " + KEYSPACE + ".token(10) FROM %s"), row(10.0d));
+    }
+
+    @Test
+    public void testCreatingUDFWithSameNameAsBuiltin_PrefersCompatibleArgs() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        createFunctionOverload(KEYSPACE + ".token", "double",
+                               "CREATE FUNCTION %s (val double) RETURNS null ON null INPUT RETURNS double LANGUAGE java AS 'return 10.0d;'");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertRowCount(execute("SELECT token(k1, k2) FROM %s"), 1);
+    }
+
+    @Test
+    public void testCreatingUDFWithSameNameAsBuiltin_FullyQualifiedFunctionNameWorks_SystemKeyspace() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 uuid, k2 text, PRIMARY KEY ((k1, k2)))");
+        createFunctionOverload(KEYSPACE + ".token", "double",
+                               "CREATE FUNCTION %s (val double) RETURNS null ON null INPUT RETURNS double LANGUAGE java AS 'return 10.0d;'");
+        execute("INSERT INTO %s (k1, k2) VALUES (uuid(), 'k2')");
+        assertRowCount(execute("SELECT system.token(k1, k2) FROM %s"), 1);
+    }
 }

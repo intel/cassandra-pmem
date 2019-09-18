@@ -178,13 +178,13 @@ public class TimeWindowCompactionStrategy extends AbstractCompactionStrategy
     }
 
     @Override
-    public void addSSTable(SSTableReader sstable)
+    public synchronized void addSSTable(SSTableReader sstable)
     {
         sstables.add(sstable);
     }
 
     @Override
-    public void removeSSTable(SSTableReader sstable)
+    public synchronized void removeSSTable(SSTableReader sstable)
     {
         sstables.remove(sstable);
     }
@@ -316,7 +316,7 @@ public class TimeWindowCompactionStrategy extends AbstractCompactionStrategy
             }
             else
             {
-                logger.debug("No compaction necessary for bucket size {} , key {}, now {}", bucket.size(), key, now);
+                logger.trace("No compaction necessary for bucket size {} , key {}, now {}", bucket.size(), key, now);
             }
         }
         return Collections.<SSTableReader>emptyList();

@@ -23,7 +23,7 @@ import java.io.IOException;
 
 import org.junit.BeforeClass;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.UpdateBuilder;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -69,7 +69,10 @@ public class BigTableWriterTest extends AbstractTransactionalTest
 
         private TestableBTW(Descriptor desc)
         {
-            this(desc, SSTableTxnWriter.create(cfs, desc, 0, 0, null, new SerializationHeader(true, cfs.metadata(), cfs.metadata().regularAndStaticColumns(), EncodingStats.NO_STATS)));
+            this(desc, SSTableTxnWriter.create(cfs, desc, 0, 0, null, false,
+                                               new SerializationHeader(true, cfs.metadata(),
+                                                                       cfs.metadata().regularAndStaticColumns(),
+                                                                       EncodingStats.NO_STATS)));
         }
 
         private TestableBTW(Descriptor desc, SSTableTxnWriter sw)

@@ -51,6 +51,11 @@ public final class ReplicationParams
         return new ReplicationParams(SimpleStrategy.class, ImmutableMap.of("replication_factor", Integer.toString(replicationFactor)));
     }
 
+    static ReplicationParams simple(String replicationFactor)
+    {
+        return new ReplicationParams(SimpleStrategy.class, ImmutableMap.of("replication_factor", replicationFactor));
+    }
+
     static ReplicationParams nts(Object... args)
     {
         assert args.length % 2 == 0;
@@ -58,9 +63,7 @@ public final class ReplicationParams
         Map<String, String> options = new HashMap<>();
         for (int i = 0; i < args.length; i += 2)
         {
-            String dc = (String) args[i];
-            Integer rf = (Integer) args[i + 1];
-            options.put(dc, rf.toString());
+            options.put((String) args[i], args[i + 1].toString());
         }
 
         return new ReplicationParams(NetworkTopologyStrategy.class, options);
@@ -74,11 +77,18 @@ public final class ReplicationParams
         AbstractReplicationStrategy.validateReplicationStrategy(name, klass, tmd, eps, options);
     }
 
-    public static ReplicationParams fromMap(Map<String, String> map)
+    public static ReplicationParams fromMap(Map<String, String> map) {
+        return fromMapWithDefaults(map, new HashMap<>());
+    }
+
+    public static ReplicationParams fromMapWithDefaults(Map<String, String> map, Map<String, String> defaults)
     {
         Map<String, String> options = new HashMap<>(map);
         String className = options.remove(CLASS);
+
         Class<? extends AbstractReplicationStrategy> klass = AbstractReplicationStrategy.getClass(className);
+        AbstractReplicationStrategy.prepareReplicationStrategyOptions(klass, options, defaults);
+
         return new ReplicationParams(klass, options);
     }
 

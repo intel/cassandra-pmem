@@ -84,7 +84,16 @@ public enum ProtocolVersion implements Comparable<ProtocolVersion>
         return ret;
     }
 
-    public static ProtocolVersion decode(int versionNum)
+    public static List<ProtocolVersion> supportedVersionsStartingWith(ProtocolVersion smallestVersion)
+    {
+        ArrayList<ProtocolVersion> versions = new ArrayList<>(SUPPORTED_VERSIONS.length);
+        for (ProtocolVersion version : SUPPORTED_VERSIONS)
+            if (version.isGreaterOrEqualTo(smallestVersion))
+                versions.add(version);
+        return versions;
+    }
+
+    public static ProtocolVersion decode(int versionNum, boolean allowOlderProtocols)
     {
         ProtocolVersion ret = versionNum >= MIN_SUPPORTED_VERSION.num && versionNum <= MAX_SUPPORTED_VERSION.num
                               ? SUPPORTED_VERSIONS[versionNum - MIN_SUPPORTED_VERSION.num]
@@ -95,15 +104,18 @@ public enum ProtocolVersion implements Comparable<ProtocolVersion>
             // if this is not a supported version check the old versions
             for (ProtocolVersion version : UNSUPPORTED)
             {
-                // if it is an old version that is no longer supported this ensures that we reply
+                // if it is an old version that is no longer supported this ensures that we respond
                 // with that same version
                 if (version.num == versionNum)
                     throw new ProtocolException(ProtocolVersion.invalidVersionMessage(versionNum), version);
             }
 
-            // If the version is invalid reply with the highest version that we support
+            // If the version is invalid response with the highest version that we support
             throw new ProtocolException(invalidVersionMessage(versionNum), MAX_SUPPORTED_VERSION);
         }
+
+        if (!allowOlderProtocols && ret.isSmallerThan(CURRENT))
+            throw new ProtocolException(String.format("Rejecting Protocol Version %s < %s.", ret, ProtocolVersion.CURRENT));
 
         return ret;
     }
@@ -122,6 +134,11 @@ public enum ProtocolVersion implements Comparable<ProtocolVersion>
     public int asInt()
     {
         return num;
+    }
+
+    public boolean supportsChecksums()
+    {
+        return num >= V5.asInt();
     }
 
     @Override

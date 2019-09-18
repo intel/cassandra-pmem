@@ -31,6 +31,7 @@ import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.virtual.VirtualMutation;
 import org.apache.cassandra.schema.TableMetadata;
 
 /**
@@ -81,17 +82,20 @@ final class SingleTableUpdatesCollector implements UpdatesCollector
      * Returns a collection containing all the mutations.
      * @return a collection containing all the mutations.
      */
-    public Collection<IMutation> toMutations()
+    public List<IMutation> toMutations()
     {
         List<IMutation> ms = new ArrayList<>();
         for (PartitionUpdate.Builder builder : puBuilders.values())
         {
-            IMutation mutation = null;
+            IMutation mutation;
 
-            if (metadata.isCounter())
+            if (metadata.isVirtual())
+                mutation = new VirtualMutation(builder.build());
+            else if (metadata.isCounter())
                 mutation = new CounterMutation(new Mutation(builder.build()), counterConsistencyLevel);
             else
                 mutation = new Mutation(builder.build());
+
             mutation.validateIndexedColumns();
             ms.add(mutation);
         }

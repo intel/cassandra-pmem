@@ -38,6 +38,30 @@ using the provided 'sstableupgrade' tool.
 
 New features
 ------------
+   - Nodes will now bootstrap all intra-cluster connections at startup by default and wait
+     10 seconds for the all but one node in the local data center to be connected and marked
+     UP in gossip. This prevents nodes from coordinating requests and failing because they
+     aren't able to connect to the cluster fast enough. block_for_peers_timeout_in_secs in
+     cassandra.yaml can be used to configure how long to wait (or whether to wait at all)
+     and block_for_peers_in_remote_dcs can be used to also block on all but one node in
+     each remote DC as well. See CASSANDRA-14297 and CASSANDRA-13993 for more information.
+   - *Experimental* support for Transient Replication and Cheap Quorums introduced by CASSANDRA-14404
+     The intended audience for this functionality is expert users of Cassandra who are prepared
+     to validate every aspect of the database for their application and deployment practices. Future
+     releases of Cassandra will make this feature suitable for a wider audience.
+   - *Experimental* support for Java 11 has been added. JVM options that differ between or are
+     specific for Java 8 and 11 have been moved from jvm.options into jvm8.options and jvm11.options.
+     IMPORTANT: Running C* on Java 11 is *experimental* and do it at your own risk.
+     Compilation recommendations: configure Java 11 SDK via JAVA_HOME and Java 8 SDK via JAVA8_HOME.
+     Release builds require Java 11 + Java 8. Development builds can use Java 8 without 11.
+   - LCS now respects the max_threshold parameter when compacting - this was hard coded to 32
+     before, but now it is possible to do bigger compactions when compacting from L0 to L1.
+     This also applies to STCS-compactions in L0 - if there are more than 32 sstables in L0
+     we will compact at most max_threshold sstables in an L0 STCS compaction. See CASSANDRA-14388
+     for more information.
+   - There is now an option to automatically upgrade sstables after Cassandra upgrade, enable
+     either in `cassandra.yaml:automatic_sstable_upgrade` or via JMX during runtime. See
+     CASSANDRA-14197.
    - `nodetool refresh` has been deprecated in favour of `nodetool import` - see CASSANDRA-6719
      for details
    - An experimental option to compare all merkle trees together has been added - for example, in
@@ -76,9 +100,31 @@ New features
      in cassandra.yaml, and the docs for create and alter role statements. CASSANDRA-13985
    - Roles altered from login=true to login=false will prevent existing connections from executing any
      statements after the cache has been refreshed. CASSANDRA-13985
+   - Support for audit logging of database activity. If enabled, logs every incoming
+     CQL command request, Authentication (successful as well as unsuccessful login) to a node.
+   - Faster streaming of entire SSTables using ZeroCopy APIs. If enabled, Cassandra will use stream
+     entire SSTables, significantly speeding up transfers. Any streaming related operations will see
+     corresponding improvement. See CASSANDRA-14556.
+   - NetworkTopologyStrategy now supports auto-expanding the replication_factor
+     option into all available datacenters at CREATE or ALTER time. For example,
+     specifying replication_factor: 3 translates to three replicas in every
+     datacenter. This auto-expansion will _only add_ datacenters for safety.
+     See CASSANDRA-14303 for more details.
 
 Upgrading
 ---------
+    - CASSANDRA-13241 lowered the default chunk_lengh_in_kb for compresesd tables from
+      64kb to 16kb. For highly compressible data this can have a noticeable impact
+      on space utilization. You may want to consider manually specifying this value.
+    - Additional columns have been added to system_distributed.repair_history,
+      system_traces.sessions and system_traces.events. As a result select queries
+      againsts these tables will fail and generate an error in the log
+      during upgrade when the cluster is mixed version. The tables can be made
+      readable by following the instructions in CASSANDRA-14897 to add the
+      new columns to the system tables before upgrading.
+    - Timestamp ties between values resolve differently: if either value has a TTL,
+      this value always wins. This is to provide consistent reconciliation before
+      and after the value expires into a tombstone.
     - Cassandra 4.0 removed support for COMPACT STORAGE tables. All Compact Tables
       have to be migrated using `ALTER ... DROP COMPACT STORAGE` statement in 3.0/3.11.
       Cassandra starting 4.0 will not start if flags indicate that the table is non-CQL.
@@ -154,6 +200,21 @@ Upgrading
     - Background repair has been removed. dclocal_read_repair_chance and
       read_repair_chance table options have been removed and are now rejected.
       See CASSANDRA-13910 for details.
+    - Internode TCP connections that do not ack segments for 30s will now
+      be automatically detected and closed via the Linux TCP_USER_TIMEOUT
+      socket option. This should be exceedingly rare, but AWS networks (and
+      other stateful firewalls) apparently suffer from this issue. You can
+      tune the timeouts on TCP connection and segment ack via the
+      `cassandra.yaml:internode_tcp_connect_timeout_in_ms` and
+      `cassandra.yaml:internode_tcp_user_timeout_in_ms` options respectively.
+      See CASSANDRA-14358 for details.
+	- repair_session_space_in_mb setting has been added to cassandra.yaml to allow operators to reduce
+	  merkle tree size if repair is creating too much heap pressure. The repair_session_max_tree_depth
+	  setting added in 3.0.19 and 3.11.5 is deprecated in favor of this setting. See CASSANDRA-14096
+    - The flags 'enable_materialized_views' and 'enable_sasi_indexes' in cassandra.yaml
+      have been set as false by default. Operators should modify them to allow the
+      creation of new views and SASI indexes, the existing ones will continue working.
+      See CASSANDRA-14866 for details.
 
 Materialized Views
 -------------------
@@ -162,6 +223,30 @@ Materialized Views
      now be logged when they are created. (See https://www.mail-archive.com/dev@cassandra.apache.org/msg11511.html)
    - An 'enable_materialized_views' flag has been added to cassandra.yaml to allow operators to prevent creation of
      views
+   - CREATE MATERIALIZED VIEW syntax has become stricter. Partition key columns are no longer implicitly considered
+     to be NOT NULL, and no base primary key columns get automatically included in view definition. You have to
+     specify them explicitly now.
+
+3.11.5
+======
+
+Experimental features
+---------------------
+    - An 'enable_sasi_indexes' flag, true by default, has been added to cassandra.yaml to allow operators to prevent
+      the creation of new SASI indexes, which are considered experimental and are not recommended for production use.
+      (See https://www.mail-archive.com/dev@cassandra.apache.org/msg13582.html)
+    - The flags 'enable_sasi_indexes' and 'enable_materialized_views' have been grouped under an experimental features
+      section in cassandra.yaml.
+
+3.11.4
+======
+
+Upgrading
+---------
+    - The order of static columns in SELECT * has been fixed to match that of 2.0 and 2.1 - they are now sorted
+      alphabetically again, by their name, just like regular columns are. If you use prepared statements and
+      SELECT * queries, and have both simple and collection static columns in those tables, and are upgrading from an
+      earlier 3.0 version, then you might be affected by this change. Please see CASSANDRA-14638 for details.
 
 3.11.3
 =====

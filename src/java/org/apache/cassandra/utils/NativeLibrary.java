@@ -29,7 +29,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.sun.jna.LastErrorException;
-import sun.nio.ch.FileChannelImpl;
+
+import org.apache.cassandra.io.FSWriteError;
 
 import static org.apache.cassandra.utils.NativeLibrary.OSType.LINUX;
 import static org.apache.cassandra.utils.NativeLibrary.OSType.MAC;
@@ -78,7 +79,14 @@ public final class NativeLibrary
     static
     {
         FILE_DESCRIPTOR_FD_FIELD = FBUtilities.getProtectedField(FileDescriptor.class, "fd");
-        FILE_CHANNEL_FD_FIELD = FBUtilities.getProtectedField(FileChannelImpl.class, "fd");
+        try
+        {
+            FILE_CHANNEL_FD_FIELD = FBUtilities.getProtectedField(Class.forName("sun.nio.ch.FileChannelImpl"), "fd");
+        }
+        catch (ClassNotFoundException e)
+        {
+            throw new RuntimeException(e);
+        }
 
         // detect the OS type the JVM is running on and then set the CLibraryWrapper
         // instance to a compatable implementation of CLibraryWrapper for that OS type
@@ -329,7 +337,9 @@ public final class NativeLibrary
             if (!(e instanceof LastErrorException))
                 throw e;
 
-            logger.warn("fsync({}) failed, errorno ({}) {}", fd, errno(e), e.getMessage());
+            String errMsg = String.format("fsync(%s) failed, errno (%s) %s", fd, errno(e), e.getMessage());
+            logger.warn(errMsg);
+            throw new FSWriteError(e, errMsg);
         }
     }
 
@@ -351,7 +361,9 @@ public final class NativeLibrary
             if (!(e instanceof LastErrorException))
                 throw e;
 
-            logger.warn("close({}) failed, errno ({}).", fd, errno(e));
+            String errMsg = String.format("close(%d) failed, errno (%d).", fd, errno(e));
+            logger.warn(errMsg);
+            throw new FSWriteError(e, errMsg);
         }
     }
 

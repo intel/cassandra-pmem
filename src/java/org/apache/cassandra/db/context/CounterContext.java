@@ -629,7 +629,7 @@ public class CounterContext
 
         ByteBuffer marked = ByteBuffer.allocate(context.remaining());
         marked.putShort(marked.position(), (short) (count * -1));
-        ByteBufferUtil.arrayCopy(context,
+        ByteBufferUtil.copyBytes(context,
                                  context.position() + HEADER_SIZE_LENGTH,
                                  marked,
                                  marked.position() + HEADER_SIZE_LENGTH,
@@ -668,7 +668,7 @@ public class CounterContext
             cleared.putShort(cleared.position() + HEADER_SIZE_LENGTH + i * HEADER_ELT_LENGTH, globalShardIndexes.get(i));
 
         int origHeaderLength = headerLength(context);
-        ByteBufferUtil.arrayCopy(context,
+        ByteBufferUtil.copyBytes(context,
                                  context.position() + origHeaderLength,
                                  cleared,
                                  cleared.position() + headerLength(cleared),
@@ -692,6 +692,9 @@ public class CounterContext
      */
     public void updateDigest(Hasher hasher, ByteBuffer context)
     {
+        // context can be empty due to the optimization from CASSANDRA-10657
+        if (!context.hasRemaining())
+            return;
         ByteBuffer dup = context.duplicate();
         dup.position(context.position() + headerLength(context));
         HashingUtils.updateBytes(hasher, dup);

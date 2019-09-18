@@ -111,7 +111,8 @@ public abstract class UnfilteredPartitionIterators
         return FilteredPartitions.filter(iterator, nowInSec);
     }
 
-    public static UnfilteredPartitionIterator merge(final List<? extends UnfilteredPartitionIterator> iterators, final int nowInSec, final MergeListener listener)
+    @SuppressWarnings("resource")
+    public static UnfilteredPartitionIterator merge(final List<? extends UnfilteredPartitionIterator> iterators, final MergeListener listener)
     {
         assert listener != null;
         assert !iterators.isEmpty();
@@ -135,6 +136,7 @@ public abstract class UnfilteredPartitionIterators
                 toMerge.set(idx, current);
             }
 
+            @SuppressWarnings("resource")
             protected UnfilteredRowIterator getReduced()
             {
                 UnfilteredRowIterators.MergeListener rowListener = listener.getRowMergeListener(partitionKey, toMerge);
@@ -153,7 +155,7 @@ public abstract class UnfilteredPartitionIterators
                     }
                 }
 
-                return UnfilteredRowIterators.merge(toMerge, nowInSec, rowListener);
+                return UnfilteredRowIterators.merge(toMerge, rowListener);
             }
 
             protected void onKeyChange()
@@ -190,7 +192,8 @@ public abstract class UnfilteredPartitionIterators
         };
     }
 
-    public static UnfilteredPartitionIterator mergeLazily(final List<? extends UnfilteredPartitionIterator> iterators, final int nowInSec)
+    @SuppressWarnings("resource")
+    public static UnfilteredPartitionIterator mergeLazily(final List<? extends UnfilteredPartitionIterator> iterators)
     {
         assert !iterators.isEmpty();
 
@@ -214,7 +217,7 @@ public abstract class UnfilteredPartitionIterators
                 {
                     protected UnfilteredRowIterator initializeIterator()
                     {
-                        return UnfilteredRowIterators.merge(toMerge, nowInSec);
+                        return UnfilteredRowIterators.merge(toMerge);
                     }
                 };
             }
@@ -253,20 +256,19 @@ public abstract class UnfilteredPartitionIterators
     /**
      * Digests the the provided iterator.
      *
+     * Caller must close the provided iterator.
+     *
      * @param iterator the iterator to digest.
      * @param hasher the {@link Hasher} to use for the digest.
      * @param version the messaging protocol to use when producing the digest.
      */
     public static void digest(UnfilteredPartitionIterator iterator, Hasher hasher, int version)
     {
-        try (UnfilteredPartitionIterator iter = iterator)
+        while (iterator.hasNext())
         {
-            while (iter.hasNext())
+            try (UnfilteredRowIterator partition = iterator.next())
             {
-                try (UnfilteredRowIterator partition = iter.next())
-                {
                     UnfilteredRowIterators.digest(partition, hasher, version);
-                }
             }
         }
     }

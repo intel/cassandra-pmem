@@ -66,7 +66,7 @@ final class LogFile implements AutoCloseable
     private final LogReplicaSet replicas = new LogReplicaSet();
 
     // The transaction records, this set must be ORDER PRESERVING
-    private final LinkedHashSet<LogRecord> records = new LinkedHashSet<>();
+    private final Set<LogRecord> records = Collections.synchronizedSet(new LinkedHashSet<>()); // TODO: Hack until we fix CASSANDRA-14554
 
     // The type of the transaction
     private final OperationType type;
@@ -247,13 +247,11 @@ final class LogFile implements AutoCloseable
 
     void commit()
     {
-        assert !completed() : "Already completed!";
         addRecord(LogRecord.makeCommit(System.currentTimeMillis()));
     }
 
     void abort()
     {
-        assert !completed() : "Already completed!";
         addRecord(LogRecord.makeAbort(System.currentTimeMillis()));
     }
 
@@ -282,20 +280,13 @@ final class LogFile implements AutoCloseable
 
     void add(Type type, SSTable table)
     {
-        add(makeRecord(type, table));
-    }
-
-    void add(LogRecord record)
-    {
-        if (!addRecord(record))
-            throw new IllegalStateException();
+        addRecord(makeRecord(type, table));
     }
 
     public void addAll(Type type, Iterable<SSTableReader> toBulkAdd)
     {
         for (LogRecord record : makeRecords(type, toBulkAdd).values())
-            if (!addRecord(record))
-                throw new IllegalStateException();
+            addRecord(record);
     }
 
     Map<SSTable, LogRecord> makeRecords(Type type, Iterable<SSTableReader> tables)
@@ -336,14 +327,17 @@ final class LogFile implements AutoCloseable
         return record.asType(type);
     }
 
-    private boolean addRecord(LogRecord record)
+    void addRecord(LogRecord record)
     {
+        if (completed())
+            throw new IllegalStateException("Transaction already completed");
+
         if (records.contains(record))
-            return false;
+            throw new IllegalStateException("Record already exists");
 
         replicas.append(record);
-
-        return records.add(record);
+        if (!records.add(record))
+            throw new IllegalStateException("Failed to add record");
     }
 
     void remove(Type type, SSTable table)

@@ -12,11 +12,6 @@ public class Node16 extends InternalNode {
     static final long CHILDREN_OFFSET = Node.HEADER_SIZE + 16L;
     private static final int  MAX_CAPACITY = 16;
 
-    /*Node16(TransactionalHeap heap) {
-        super(heap, SIZE);
-        //initType(Node.NODE16_TYPE);
-    }*/
-
     Node16(TransactionalHeap heap, TransactionalUnboundedMemoryBlock mb) {
         super(heap, mb);
     }
@@ -58,7 +53,7 @@ public class Node16 extends InternalNode {
         for (int i=0; i < entries.length; i++) {
             if (i != blankIndex) entries[index++] = new NodeEntry(radices[i], getChildAtIndex(i));
         }
-        Arrays.sort(entries, (hasBlank) ? 1 : 0, entries.length, (x, y)-> Byte.compare(x.radix, y.radix));
+        Arrays.sort(entries, (hasBlank) ? 1 : 0, entries.length, (x, y)-> Integer.compareUnsigned(Byte.toUnsignedInt(x.radix), Byte.toUnsignedInt(y.radix)));
         return entries;
     }
 
@@ -91,7 +86,6 @@ public class Node16 extends InternalNode {
         else index = findChildIndex(radix);
 
         if (index != -1) {
-            //mb.addToTransaction(Node.HEADER_SIZE, this.SIZE - Node.HEADER_SIZE);
             mb.withRange(Node.HEADER_SIZE, this.SIZE - Node.HEADER_SIZE, (Range range) -> {
                 //delete radix
                 range.copyFromMemoryBlock(mb, RADIX_OFFSET + index + 1, RADIX_OFFSET + index, MAX_CAPACITY - index - 1);        
@@ -104,7 +98,6 @@ public class Node16 extends InternalNode {
         }
     }
  
-    // TODO: make vectorized
     @Override
     int findChildIndex(byte radix) {
         byte[] radices = getRadices();

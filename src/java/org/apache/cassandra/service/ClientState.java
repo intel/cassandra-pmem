@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.service;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Arrays;
@@ -29,6 +30,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.*;
+import org.apache.cassandra.db.virtual.VirtualSchemaKeyspace;
+import org.apache.cassandra.exceptions.RequestExecutionException;
+import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -38,13 +42,13 @@ import org.apache.cassandra.cql3.QueryHandler;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.dht.Datacenters;
 import org.apache.cassandra.exceptions.AuthenticationException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.UnauthorizedException;
 import org.apache.cassandra.schema.SchemaKeyspace;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-import org.apache.cassandra.utils.CassandraVersion;
 
 /**
  * State related to a client connection.
@@ -52,7 +56,6 @@ import org.apache.cassandra.utils.CassandraVersion;
 public class ClientState
 {
     private static final Logger logger = LoggerFactory.getLogger(ClientState.class);
-    public static final CassandraVersion DEFAULT_CQL_VERSION = org.apache.cassandra.cql3.QueryProcessor.CQL_VERSION;
 
     private static final Set<IResource> READABLE_SYSTEM_RESOURCES = new HashSet<>();
     private static final Set<IResource> PROTECTED_AUTH_RESOURCES = new HashSet<>();
@@ -64,7 +67,11 @@ public class ClientState
         for (String cf : Arrays.asList(SystemKeyspace.LOCAL, SystemKeyspace.LEGACY_PEERS, SystemKeyspace.PEERS_V2))
             READABLE_SYSTEM_RESOURCES.add(DataResource.table(SchemaConstants.SYSTEM_KEYSPACE_NAME, cf));
 
+        // make all schema tables readable by default (required by the drivers)
         SchemaKeyspace.ALL.forEach(table -> READABLE_SYSTEM_RESOURCES.add(DataResource.table(SchemaConstants.SCHEMA_KEYSPACE_NAME, table)));
+
+        // make all virtual schema tables readable by default as well
+        VirtualSchemaKeyspace.instance.tables().forEach(t -> READABLE_SYSTEM_RESOURCES.add(t.metadata().resource));
 
         // neither clients nor tools need authentication/authorization
         if (DatabaseDescriptor.isDaemonInitialized())
@@ -150,6 +157,13 @@ public class ClientState
     public static ClientState forInternalCalls()
     {
         return new ClientState();
+    }
+
+    public static ClientState forInternalCalls(String keyspace)
+    {
+        ClientState state = new ClientState();
+        state.setKeyspace(keyspace);
+        return state;
     }
 
     /**
@@ -280,6 +294,11 @@ public class ClientState
         return remoteAddress;
     }
 
+    InetAddress getClientAddress()
+    {
+        return isInternal ? null : remoteAddress.getAddress();
+    }
+
     public String getRawKeyspace()
     {
         return keyspace;
@@ -292,7 +311,7 @@ public class ClientState
         return keyspace;
     }
 
-    public void setKeyspace(String ks) throws InvalidRequestException
+    public void setKeyspace(String ks)
     {
         // Skip keyspace validation for non-authenticated users. Apparently, some client libraries
         // call set_keyspace() before calling login(), and we have to handle that.
@@ -304,51 +323,55 @@ public class ClientState
     /**
      * Attempts to login the given user.
      */
-    public void login(AuthenticatedUser user) throws AuthenticationException
+    public void login(AuthenticatedUser user)
     {
-        // Login privilege is not inherited via granted roles, so just
-        // verify that the role with the credentials that were actually
-        // supplied has it
-        if (user.isAnonymous() || DatabaseDescriptor.getRoleManager().canLogin(user.getPrimaryRole()))
+        if (user.isAnonymous() || canLogin(user))
             this.user = user;
         else
             throw new AuthenticationException(String.format("%s is not permitted to log in", user.getName()));
     }
 
-    public void hasAllKeyspacesAccess(Permission perm) throws UnauthorizedException
+    private boolean canLogin(AuthenticatedUser user)
+    {
+        try
+        {
+            return user.canLogin();
+        }
+        catch (RequestExecutionException | RequestValidationException e)
+        {
+            throw new AuthenticationException("Unable to perform authentication: " + e.getMessage(), e);
+        }
+    }
+
+    public void ensureAllKeyspacesPermission(Permission perm)
     {
         if (isInternal)
             return;
         validateLogin();
-        ensureHasPermission(perm, DataResource.root());
+        ensurePermission(perm, DataResource.root());
     }
 
-    public void hasKeyspaceAccess(String keyspace, Permission perm) throws UnauthorizedException, InvalidRequestException
+    public void ensureKeyspacePermission(String keyspace, Permission perm)
     {
-        hasAccess(keyspace, perm, DataResource.keyspace(keyspace));
+        ensurePermission(keyspace, perm, DataResource.keyspace(keyspace));
     }
 
-    public void hasColumnFamilyAccess(String keyspace, String columnFamily, Permission perm)
-    throws UnauthorizedException, InvalidRequestException
+    public void ensureTablePermission(String keyspace, String table, Permission perm)
     {
-        Schema.instance.validateTable(keyspace, columnFamily);
-        hasAccess(keyspace, perm, DataResource.table(keyspace, columnFamily));
+        ensurePermission(keyspace, perm, DataResource.table(keyspace, table));
     }
 
-    public void hasColumnFamilyAccess(TableMetadataRef tableRef, Permission perm)
-    throws UnauthorizedException, InvalidRequestException
+    public void ensureTablePermission(TableMetadataRef tableRef, Permission perm)
     {
-        hasColumnFamilyAccess(tableRef.get(), perm);
+        ensureTablePermission(tableRef.get(), perm);
     }
 
-    public void hasColumnFamilyAccess(TableMetadata table, Permission perm)
-    throws UnauthorizedException, InvalidRequestException
+    public void ensureTablePermission(TableMetadata table, Permission perm)
     {
-        hasAccess(table.keyspace, perm, table.resource);
+        ensurePermission(table.keyspace, perm, table.resource);
     }
 
-    private void hasAccess(String keyspace, Permission perm, DataResource resource)
-    throws UnauthorizedException, InvalidRequestException
+    private void ensurePermission(String keyspace, Permission perm, DataResource resource)
     {
         validateKeyspace(keyspace);
 
@@ -365,11 +388,10 @@ public class ClientState
         if (PROTECTED_AUTH_RESOURCES.contains(resource))
             if ((perm == Permission.CREATE) || (perm == Permission.ALTER) || (perm == Permission.DROP))
                 throw new UnauthorizedException(String.format("%s schema is protected", resource));
-
-        ensureHasPermission(perm, resource);
+        ensurePermission(perm, resource);
     }
 
-    public void ensureHasPermission(Permission perm, IResource resource) throws UnauthorizedException
+    public void ensurePermission(Permission perm, IResource resource)
     {
         if (!DatabaseDescriptor.getAuthorizer().requireAuthorization())
             return;
@@ -379,12 +401,12 @@ public class ClientState
             if (((FunctionResource)resource).getKeyspace().equals(SchemaConstants.SYSTEM_KEYSPACE_NAME))
                 return;
 
-        checkPermissionOnResourceChain(perm, resource);
+        ensurePermissionOnResourceChain(perm, resource);
     }
 
-    // Convenience method called from checkAccess method of CQLStatement
+    // Convenience method called from authorize method of CQLStatement
     // Also avoids needlessly creating lots of FunctionResource objects
-    public void ensureHasPermission(Permission permission, Function function)
+    public void ensurePermission(Permission permission, Function function)
     {
         // Save creating a FunctionResource is we don't need to
         if (!DatabaseDescriptor.getAuthorizer().requireAuthorization())
@@ -394,12 +416,12 @@ public class ClientState
         if (function.isNative())
             return;
 
-        checkPermissionOnResourceChain(permission, FunctionResource.function(function.name().keyspace,
-                                                                             function.name().name,
-                                                                             function.argTypes()));
+        ensurePermissionOnResourceChain(permission, FunctionResource.function(function.name().keyspace,
+                                                                              function.name().name,
+                                                                              function.argTypes()));
     }
 
-    private void checkPermissionOnResourceChain(Permission perm, IResource resource)
+    private void ensurePermissionOnResourceChain(Permission perm, IResource resource)
     {
         for (IResource r : Resources.chain(resource))
             if (authorize(r).contains(perm))
@@ -411,7 +433,7 @@ public class ClientState
                                                       resource));
     }
 
-    private void preventSystemKSSchemaModification(String keyspace, DataResource resource, Permission perm) throws UnauthorizedException
+    private void preventSystemKSSchemaModification(String keyspace, DataResource resource, Permission perm)
     {
         // we only care about DDL statements
         if (perm != Permission.ALTER && perm != Permission.DROP && perm != Permission.CREATE)
@@ -432,7 +454,7 @@ public class ClientState
         }
     }
 
-    public void validateLogin() throws UnauthorizedException
+    public void validateLogin()
     {
         if (user == null)
         {
@@ -440,24 +462,24 @@ public class ClientState
         }
         else if (!user.hasLocalAccess())
         {
-            throw new UnauthorizedException("You do not have access to this datacenter");
+            throw new UnauthorizedException(String.format("You do not have access to this datacenter (%s)", Datacenters.thisDatacenter()));
         }
     }
 
-    public void ensureNotAnonymous() throws UnauthorizedException
+    public void ensureNotAnonymous()
     {
         validateLogin();
         if (user.isAnonymous())
             throw new UnauthorizedException("You have to be logged in and not anonymous to perform this request");
     }
 
-    public void ensureIsSuper(String message) throws UnauthorizedException
+    public void ensureIsSuperuser(String message)
     {
         if (DatabaseDescriptor.getAuthenticator().requireAuthentication() && (user == null || !user.isSuper()))
             throw new UnauthorizedException(message);
     }
 
-    private static void validateKeyspace(String keyspace) throws InvalidRequestException
+    private static void validateKeyspace(String keyspace)
     {
         if (keyspace == null)
             throw new InvalidRequestException("You have not set a keyspace for this session");
@@ -466,11 +488,6 @@ public class ClientState
     public AuthenticatedUser getUser()
     {
         return user;
-    }
-
-    public static CassandraVersion[] getCQLSupportedVersion()
-    {
-        return new CassandraVersion[]{ QueryProcessor.CQL_VERSION };
     }
 
     private Set<Permission> authorize(IResource resource)

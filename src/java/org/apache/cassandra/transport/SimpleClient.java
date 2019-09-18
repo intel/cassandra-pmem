@@ -45,6 +45,10 @@ import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.security.SSLFactory;
+import org.apache.cassandra.transport.frame.checksum.ChecksummingTransformer;
+import org.apache.cassandra.transport.frame.compress.CompressingTransformer;
+import org.apache.cassandra.transport.frame.compress.Compressor;
+import org.apache.cassandra.transport.frame.compress.LZ4Compressor;
 import org.apache.cassandra.transport.messages.ErrorMessage;
 import org.apache.cassandra.transport.messages.EventMessage;
 import org.apache.cassandra.transport.messages.ExecuteMessage;
@@ -56,6 +60,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
+import org.apache.cassandra.utils.ChecksumType;
 
 public class SimpleClient implements Closeable
 {
@@ -117,19 +122,35 @@ public class SimpleClient implements Closeable
         this(host, port, new EncryptionOptions());
     }
 
-    public SimpleClient connect(boolean useCompression) throws IOException
+    public SimpleClient connect(boolean useCompression, boolean useChecksums) throws IOException
+    {
+        return connect(useCompression, useChecksums, false);
+    }
+
+    public SimpleClient connect(boolean useCompression, boolean useChecksums, boolean throwOnOverload) throws IOException
     {
         establishConnection();
 
         Map<String, String> options = new HashMap<>();
         options.put(StartupMessage.CQL_VERSION, "3.0.0");
-        if (useCompression)
-        {
-            options.put(StartupMessage.COMPRESSION, "snappy");
-            connection.setCompressor(FrameCompressor.SnappyCompressor.instance);
-        }
-        execute(new StartupMessage(options));
+        if (throwOnOverload)
+            options.put(StartupMessage.THROW_ON_OVERLOAD, "1");
+        connection.setThrowOnOverload(throwOnOverload);
 
+        if (useChecksums)
+        {
+            Compressor compressor = useCompression ? LZ4Compressor.INSTANCE : null;
+            connection.setTransformer(ChecksummingTransformer.getTransformer(ChecksumType.CRC32, compressor));
+            options.put(StartupMessage.CHECKSUM, "crc32");
+            options.put(StartupMessage.COMPRESSION, "lz4");
+        }
+        else if (useCompression)
+        {
+            connection.setTransformer(CompressingTransformer.getTransformer(LZ4Compressor.INSTANCE));
+            options.put(StartupMessage.COMPRESSION, "lz4");
+        }
+
+        execute(new StartupMessage(options));
         return this;
     }
 
@@ -241,8 +262,8 @@ public class SimpleClient implements Closeable
     // Stateless handlers
     private static final Message.ProtocolDecoder messageDecoder = new Message.ProtocolDecoder();
     private static final Message.ProtocolEncoder messageEncoder = new Message.ProtocolEncoder();
-    private static final Frame.Decompressor frameDecompressor = new Frame.Decompressor();
-    private static final Frame.Compressor frameCompressor = new Frame.Compressor();
+    private static final Frame.InboundBodyTransformer inboundFrameTransformer = new Frame.InboundBodyTransformer();
+    private static final Frame.OutboundBodyTransformer outboundFrameTransformer = new Frame.OutboundBodyTransformer();
     private static final Frame.Encoder frameEncoder = new Frame.Encoder();
 
     private static class ConnectionTracker implements Connection.Tracker
@@ -266,8 +287,8 @@ public class SimpleClient implements Closeable
             pipeline.addLast("frameDecoder", new Frame.Decoder(connectionFactory));
             pipeline.addLast("frameEncoder", frameEncoder);
 
-            pipeline.addLast("frameDecompressor", frameDecompressor);
-            pipeline.addLast("frameCompressor", frameCompressor);
+            pipeline.addLast("inboundFrameTransformer", inboundFrameTransformer);
+            pipeline.addLast("outboundFrameTransformer", outboundFrameTransformer);
 
             pipeline.addLast("messageDecoder", messageDecoder);
             pipeline.addLast("messageEncoder", messageEncoder);
@@ -281,8 +302,8 @@ public class SimpleClient implements Closeable
         protected void initChannel(Channel channel) throws Exception
         {
             super.initChannel(channel);
-            SslContext sslContext = SSLFactory.getSslContext(encryptionOptions, encryptionOptions.require_client_auth,
-                                                             SSLFactory.ConnectionType.NATIVE_TRANSPORT, SSLFactory.SocketType.CLIENT);
+            SslContext sslContext = SSLFactory.getOrCreateSslContext(encryptionOptions, encryptionOptions.require_client_auth,
+                                                                     SSLFactory.SocketType.CLIENT);
             channel.pipeline().addFirst("ssl", sslContext.newHandler(channel.alloc()));
         }
     }

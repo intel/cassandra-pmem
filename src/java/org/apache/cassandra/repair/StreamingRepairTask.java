@@ -22,12 +22,14 @@ import java.util.Collections;
 import java.util.Collection;
 
 import com.google.common.annotations.VisibleForTesting;
+import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.repair.messages.SyncComplete;
 import org.apache.cassandra.streaming.PreviewKind;
@@ -36,6 +38,8 @@ import org.apache.cassandra.streaming.StreamEventHandler;
 import org.apache.cassandra.streaming.StreamPlan;
 import org.apache.cassandra.streaming.StreamState;
 import org.apache.cassandra.streaming.StreamOperation;
+
+import static org.apache.cassandra.net.Verb.REPAIR_REQ;
 
 /**
  * StreamingRepairTask performs data streaming between two remote replicas, neither of which is repair coordinator.
@@ -78,9 +82,12 @@ public class StreamingRepairTask implements Runnable, StreamEventHandler
         StreamPlan sp = new StreamPlan(StreamOperation.REPAIR, 1, false, pendingRepair, previewKind)
                .listeners(this)
                .flushBeforeTransfer(pendingRepair == null) // sstables are isolated at the beginning of an incremental repair session, so flushing isn't neccessary
-               .requestRanges(dest, desc.keyspace, ranges, desc.columnFamily); // request ranges from the remote node
+               // see comment on RangesAtEndpoint.toDummyList for why we synthesize replicas here
+               .requestRanges(dest, desc.keyspace, RangesAtEndpoint.toDummyList(ranges),
+                       RangesAtEndpoint.toDummyList(Collections.emptyList()), desc.columnFamily); // request ranges from the remote node
         if (!asymmetric)
-            sp.transferRanges(dest, desc.keyspace, ranges, desc.columnFamily); // send ranges to the remote node
+            // see comment on RangesAtEndpoint.toDummyList for why we synthesize replicas here
+            sp.transferRanges(dest, desc.keyspace, RangesAtEndpoint.toDummyList(ranges), desc.columnFamily); // send ranges to the remote node
         return sp;
     }
 
@@ -91,19 +98,19 @@ public class StreamingRepairTask implements Runnable, StreamEventHandler
     }
 
     /**
-     * If we succeeded on both stream in and out, reply back to coordinator
+     * If we succeeded on both stream in and out, respond back to coordinator
      */
     public void onSuccess(StreamState state)
     {
         logger.info("[repair #{}] streaming task succeed, returning response to {}", desc.sessionId, initiator);
-        MessagingService.instance().sendOneWay(new SyncComplete(desc, src, dst, true, state.createSummaries()).createMessage(), initiator);
+        MessagingService.instance().send(Message.out(REPAIR_REQ, new SyncComplete(desc, src, dst, true, state.createSummaries())), initiator);
     }
 
     /**
-     * If we failed on either stream in or out, reply fail to coordinator
+     * If we failed on either stream in or out, respond fail to coordinator
      */
     public void onFailure(Throwable t)
     {
-        MessagingService.instance().sendOneWay(new SyncComplete(desc, src, dst, false, Collections.emptyList()).createMessage(), initiator);
+        MessagingService.instance().send(Message.out(REPAIR_REQ, new SyncComplete(desc, src, dst, false, Collections.emptyList())), initiator);
     }
 }

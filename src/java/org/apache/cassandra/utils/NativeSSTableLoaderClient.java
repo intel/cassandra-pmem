@@ -75,9 +75,6 @@ public class NativeSSTableLoaderClient extends SSTableLoader.Client
         Set<InetAddress> hostAddresses = hosts.stream().map(host -> host.getAddress()).collect(Collectors.toSet());
         Cluster.Builder builder = Cluster.builder().addContactPoints(hostAddresses).withPort(port).allowBetaProtocolVersion();
 
-        if (allowServerPortDiscovery)
-            builder = builder.allowServerPortDiscovery();
-
         if (sslOptions != null)
             builder.withSSL(sslOptions);
         if (authProvider != null)
@@ -100,15 +97,8 @@ public class NativeSSTableLoaderClient extends SSTableLoader.Client
                                                  tokenFactory.fromString(tokenRange.getEnd().getValue().toString()));
                 for (Host endpoint : endpoints)
                 {
-                    int portToUse;
-                    if (allowServerPortDiscovery)
-                    {
-                        portToUse = endpoint.getBroadcastAddressOptPort().portOrElse(storagePort);
-                    }
-                    else
-                    {
-                        portToUse = storagePort;
-                    }
+                    int broadcastPort = endpoint.getBroadcastSocketAddress().getPort();
+                    int portToUse = broadcastPort != 0 ? broadcastPort : storagePort;
                     addRangeForEndpoint(range, InetAddressAndPort.getByNameOverrideDefaults(endpoint.getAddress().getHostAddress(), portToUse));
                 }
             }
@@ -230,9 +220,7 @@ public class NativeSSTableLoaderClient extends SSTableLoader.Client
         if (order == ClusteringOrder.DESC)
             type = ReversedType.getInstance(type);
 
-        ColumnIdentifier name = ColumnIdentifier.getInterned(type,
-                                                             row.getBytes("column_name_bytes"),
-                                                             row.getString("column_name"));
+        ColumnIdentifier name = new ColumnIdentifier(row.getBytes("column_name_bytes"), row.getString("column_name"));
 
         int position = row.getInt("position");
         org.apache.cassandra.schema.ColumnMetadata.Kind kind = ColumnMetadata.Kind.valueOf(row.getString("kind").toUpperCase());

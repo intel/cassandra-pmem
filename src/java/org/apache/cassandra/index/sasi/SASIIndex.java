@@ -19,13 +19,14 @@ package org.apache.cassandra.index.sasi;
 
 import java.util.*;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 
 import com.googlecode.concurrenttrees.common.Iterables;
 
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.Operator;
-import org.apache.cassandra.cql3.statements.IndexTarget;
+import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -60,8 +61,12 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+
 public class SASIIndex implements Index, INotificationConsumer
 {
+    public final static String USAGE_WARNING = "SASI indexes are experimental and are not recommended for production use.";
+
     private static class SASIIndexBuildingSupport implements IndexBuildingSupport
     {
         public SecondaryIndexBuilder getIndexBuildTask(ColumnFamilyStore cfs,
@@ -124,6 +129,9 @@ public class SASIIndex implements Index, INotificationConsumer
         CompactionManager.instance.submitIndexBuild(new SASIIndexBuilder(baseCfs, toRebuild));
     }
 
+    /**
+     * Called via reflection at {@link IndexMetadata#validateCustomIndexOptions}
+     */
     public static Map<String, String> validateOptions(Map<String, String> options, TableMetadata metadata)
     {
         if (!(metadata.partitioner instanceof Murmur3Partitioner))
@@ -143,7 +151,7 @@ public class SASIIndex implements Index, INotificationConsumer
         if (target.left.isPartitionKey())
             throw new ConfigurationException("partition key columns are not yet supported by SASI");
 
-        IndexMode.validateAnalyzer(options);
+        IndexMode.validateAnalyzer(options, target.left);
 
         IndexMode mode = IndexMode.getMode(target.left, options);
         if (mode.mode == Mode.SPARSE)
@@ -290,7 +298,7 @@ public class SASIIndex implements Index, INotificationConsumer
     {
         TableMetadata config = command.metadata();
         ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(config.id);
-        return controller -> new QueryPlan(cfs, command, DatabaseDescriptor.getRangeRpcTimeout()).execute(controller);
+        return controller -> new QueryPlan(cfs, command, DatabaseDescriptor.getRangeRpcTimeout(MILLISECONDS)).execute(controller);
     }
 
     public SSTableFlushObserver getFlushObserver(Descriptor descriptor, OperationType opType)

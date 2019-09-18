@@ -23,14 +23,18 @@ import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 
+import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.db.marshal.BytesType;
 import org.junit.AfterClass;
 import org.junit.Test;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.io.util.DataInputBuffer;
@@ -50,6 +54,31 @@ public class ColumnsTest
     }
 
     private static final TableMetadata TABLE_METADATA = MockSchema.newCFS().metadata();
+
+    @Test
+    public void testDeserializeCorruption() throws IOException
+    {
+        ColumnsCheck check = randomSmall(1, 0, 3, 0);
+        Columns superset = check.columns;
+        List<ColumnMetadata> minus1 = new ArrayList<>(check.definitions);
+        minus1.remove(3);
+        Columns minus2 = check.columns
+                .without(check.columns.getSimple(3))
+                .without(check.columns.getSimple(2));
+        try (DataOutputBuffer out = new DataOutputBuffer())
+        {
+            // serialize a subset
+            Columns.serializer.serializeSubset(minus1, superset, out);
+            try (DataInputBuffer in = new DataInputBuffer(out.toByteArray()))
+            {
+                Columns.serializer.deserializeSubset(minus2, in);
+                Assert.assertFalse(true);
+            }
+            catch (IOException e)
+            {
+            }
+        }
+    }
 
     // this tests most of our functionality, since each subset we perform
     // reasonably comprehensive tests of basic functionality against
@@ -134,19 +163,75 @@ public class ColumnsTest
     {
         List<String> names = new ArrayList<>();
         for (int i = 0; i < 50; i++)
-            names.add("clustering_" + i);
+            names.add("regular_" + i);
 
         List<ColumnMetadata> defs = new ArrayList<>();
-        addClustering(names, defs);
+        addRegular(names, defs);
 
         Columns columns = Columns.from(new HashSet<>(defs));
 
         defs = new ArrayList<>();
-        addClustering(names.subList(0, 8), defs);
+        addRegular(names.subList(0, 8), defs);
 
         Columns subset = Columns.from(new HashSet<>(defs));
 
         Assert.assertTrue(columns.containsAll(subset));
+    }
+
+    @Test
+    public void testStaticColumns()
+    {
+        testColumns(ColumnMetadata.Kind.STATIC);
+    }
+
+    @Test
+    public void testRegularColumns()
+    {
+        testColumns(ColumnMetadata.Kind.REGULAR);
+    }
+
+    private void testColumns(ColumnMetadata.Kind kind)
+    {
+        List<ColumnMetadata> definitions = ImmutableList.of(
+            def("a", UTF8Type.instance, kind),
+            def("b", SetType.getInstance(UTF8Type.instance, true), kind),
+            def("c", UTF8Type.instance, kind),
+            def("d", SetType.getInstance(UTF8Type.instance, true), kind),
+            def("e", UTF8Type.instance, kind),
+            def("f", SetType.getInstance(UTF8Type.instance, true), kind),
+            def("g", UTF8Type.instance, kind),
+            def("h", SetType.getInstance(UTF8Type.instance, true), kind)
+        );
+        Columns columns = Columns.from(definitions);
+
+        // test simpleColumnCount()
+        Assert.assertEquals(4, columns.simpleColumnCount());
+
+        // test simpleColumns()
+        List<ColumnMetadata> simpleColumnsExpected =
+            ImmutableList.of(definitions.get(0), definitions.get(2), definitions.get(4), definitions.get(6));
+        List<ColumnMetadata> simpleColumnsActual = new ArrayList<>();
+        Iterators.addAll(simpleColumnsActual, columns.simpleColumns());
+        Assert.assertEquals(simpleColumnsExpected, simpleColumnsActual);
+
+        // test complexColumnCount()
+        Assert.assertEquals(4, columns.complexColumnCount());
+
+        // test complexColumns()
+        List<ColumnMetadata> complexColumnsExpected =
+            ImmutableList.of(definitions.get(1), definitions.get(3), definitions.get(5), definitions.get(7));
+        List<ColumnMetadata> complexColumnsActual = new ArrayList<>();
+        Iterators.addAll(complexColumnsActual, columns.complexColumns());
+        Assert.assertEquals(complexColumnsExpected, complexColumnsActual);
+
+        // test size()
+        Assert.assertEquals(8, columns.size());
+
+        // test selectOrderIterator()
+        List<ColumnMetadata> columnsExpected = definitions;
+        List<ColumnMetadata> columnsActual = new ArrayList<>();
+        Iterators.addAll(columnsActual, columns.selectOrderIterator());
+        Assert.assertEquals(columnsExpected, columnsActual);
     }
 
     private void testSerializeSubset(ColumnsCheck input) throws IOException
@@ -402,10 +487,15 @@ public class ColumnsTest
             results.add(ColumnMetadata.regularColumn(TABLE_METADATA, bytes(name), UTF8Type.instance));
     }
 
-    private static <V> void addComplex(List<String> names, List<ColumnMetadata> results)
+    private static void addComplex(List<String> names, List<ColumnMetadata> results)
     {
         for (String name : names)
             results.add(ColumnMetadata.regularColumn(TABLE_METADATA, bytes(name), SetType.getInstance(UTF8Type.instance, true)));
+    }
+
+    private static ColumnMetadata def(String name, AbstractType<?> type, ColumnMetadata.Kind kind)
+    {
+        return new ColumnMetadata(TABLE_METADATA, bytes(name), type, ColumnMetadata.NO_POSITION, kind);
     }
 
     private static TableMetadata mock(Columns columns)

@@ -30,6 +30,7 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
+import static org.apache.cassandra.db.ClusteringPrefix.Kind.*;
 import static org.junit.Assert.*;
 
 public class SliceTest
@@ -43,8 +44,8 @@ public class SliceTest
         types.add(Int32Type.instance);
         ClusteringComparator cc = new ClusteringComparator(types);
 
-        ClusteringPrefix.Kind sk = ClusteringPrefix.Kind.INCL_START_BOUND;
-        ClusteringPrefix.Kind ek = ClusteringPrefix.Kind.INCL_END_BOUND;
+        ClusteringPrefix.Kind sk = INCL_START_BOUND;
+        ClusteringPrefix.Kind ek = INCL_END_BOUND;
 
         // filter falls entirely before sstable
         Slice slice = Slice.make(makeBound(sk, 0, 0, 0), makeBound(ek, 1, 0, 0));
@@ -226,48 +227,6 @@ public class SliceTest
         slice = Slice.make(makeBound(sk, 0), makeBound(ek, 2, 0, 0));
         assertTrue(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 0, 0)));
 
-        // the slice technically falls within the sstable range, but since the first component is restricted to
-        // a single value, we can check that the second component does not fall within its min/max
-        slice = Slice.make(makeBound(sk, 1, 2, 0), makeBound(ek, 1, 3, 0));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same case, but with a missing start component
-        slice = Slice.make(makeBound(sk, 1, 2), makeBound(ek, 1, 3, 0));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same case, but with a missing end component
-        slice = Slice.make(makeBound(sk, 1, 2, 0), makeBound(ek, 1, 3));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same case, but with a missing start and end components
-        slice = Slice.make(makeBound(sk, 1, 2), makeBound(ek, 1, 3));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same case, but with missing start and end components and different lengths for start and end
-        slice = Slice.make(makeBound(sk, 1, 2), makeBound(ek, 1));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-
-        // same as the previous set of tests, but the second component is equal in the slice start and end
-        slice = Slice.make(makeBound(sk, 1, 2, 0), makeBound(ek, 1, 2, 0));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same case, but with a missing start component
-        slice = Slice.make(makeBound(sk, 1, 2), makeBound(ek, 1, 2, 0));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same case, but with a missing end component
-        slice = Slice.make(makeBound(sk, 1, 2, 0), makeBound(ek, 1, 2));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same case, but with a missing start and end components
-        slice = Slice.make(makeBound(sk, 1, 2), makeBound(ek, 1, 2));
-        assertFalse(slice.intersects(cc, columnNames(1, 0, 0), columnNames(2, 1, 0)));
-
-        // same as the previous tests, but it's the third component that doesn't fit in its range this time
-        slice = Slice.make(makeBound(sk, 1, 1, 2), makeBound(ek, 1, 1, 3));
-        assertFalse(slice.intersects(cc, columnNames(1, 1, 0), columnNames(2, 2, 1)));
-
         // empty min/max column names
         slice = Slice.make(makeBound(sk), makeBound(ek));
         assertTrue(slice.intersects(cc, columnNames(), columnNames()));
@@ -316,8 +275,8 @@ public class SliceTest
         types.add(Int32Type.instance);
         ClusteringComparator cc = new ClusteringComparator(types);
 
-        ClusteringPrefix.Kind sk = ClusteringPrefix.Kind.INCL_START_BOUND;
-        ClusteringPrefix.Kind ek = ClusteringPrefix.Kind.INCL_END_BOUND;
+        ClusteringPrefix.Kind sk = INCL_START_BOUND;
+        ClusteringPrefix.Kind ek = INCL_END_BOUND;
 
         // slice does intersect
         Slice slice = Slice.make(makeBound(sk), makeBound(ek));
@@ -365,6 +324,26 @@ public class SliceTest
         assertSlicesNormalization(cc, slices(s(-1, 2), s(-1, 3), s(5, 9)), slices(s(-1, 3), s(5, 9)));
     }
 
+    @Test
+    public void testIsEmpty()
+    {
+        List<AbstractType<?>> types = new ArrayList<>();
+        types.add(Int32Type.instance);
+        types.add(Int32Type.instance);
+        ClusteringComparator cc = new ClusteringComparator(types);
+
+        assertFalse(Slice.isEmpty(cc, makeBound(INCL_START_BOUND, 5, 0), makeBound(INCL_END_BOUND, 5, 0)));
+        assertFalse(Slice.isEmpty(cc, makeBound(INCL_START_BOUND, 5, 0), makeBound(EXCL_END_BOUND, 5, 1)));
+        assertFalse(Slice.isEmpty(cc, makeBound(INCL_START_BOUND, 5), makeBound(EXCL_END_BOUND, 5, 1)));
+
+        assertTrue(Slice.isEmpty(cc, makeBound(EXCL_START_BOUND, 5), makeBound(EXCL_END_BOUND, 5)));
+        assertTrue(Slice.isEmpty(cc, makeBound(EXCL_START_BOUND, 5), makeBound(EXCL_END_BOUND, 5, 1)));
+        assertTrue(Slice.isEmpty(cc, makeBound(EXCL_START_BOUND, 5, 1), makeBound(EXCL_END_BOUND, 5, 1)));
+        assertTrue(Slice.isEmpty(cc, makeBound(INCL_START_BOUND, 5, 0), makeBound(INCL_END_BOUND, 4, 0)));
+        assertTrue(Slice.isEmpty(cc, makeBound(INCL_START_BOUND, 5, 0), makeBound(EXCL_END_BOUND, 5)));
+        assertTrue(Slice.isEmpty(cc, makeBound(INCL_START_BOUND, 5, 0), makeBound(EXCL_END_BOUND, 3, 0)));
+    }
+
     private static ClusteringBound makeBound(ClusteringPrefix.Kind kind, Integer... components)
     {
         ByteBuffer[] values = new ByteBuffer[components.length];
@@ -385,8 +364,8 @@ public class SliceTest
 
     private static Slice s(int start, int finish)
     {
-        return Slice.make(makeBound(ClusteringPrefix.Kind.INCL_START_BOUND, start),
-                          makeBound(ClusteringPrefix.Kind.INCL_END_BOUND, finish));
+        return Slice.make(makeBound(INCL_START_BOUND, start),
+                          makeBound(INCL_END_BOUND, finish));
     }
 
     private Slice[] slices(Slice... slices)

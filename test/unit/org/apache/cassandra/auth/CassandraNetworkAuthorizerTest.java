@@ -40,18 +40,18 @@ import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.cql3.statements.CreateRoleStatement;
 import org.apache.cassandra.cql3.statements.DropRoleStatement;
 import org.apache.cassandra.cql3.statements.SelectStatement;
-import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
-import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.messages.ResultMessage;
 
 import static org.apache.cassandra.auth.AuthKeyspace.NETWORK_PERMISSIONS;
+import static org.apache.cassandra.auth.RoleTestUtils.LocalCassandraRoleManager;
 import static org.apache.cassandra.schema.SchemaConstants.AUTH_KEYSPACE_NAME;
+import static org.apache.cassandra.auth.RoleTestUtils.getReadCount;
 
 public class CassandraNetworkAuthorizerTest
 {
@@ -59,7 +59,7 @@ public class CassandraNetworkAuthorizerTest
     {
         ResultMessage.Rows select(SelectStatement statement, QueryOptions options)
         {
-            return statement.executeInternal(QueryState.forInternalCalls(), options);
+            return statement.executeLocally(QueryState.forInternalCalls(), options);
         }
 
         UntypedResultSet process(String query) throws RequestExecutionException
@@ -70,20 +70,7 @@ public class CassandraNetworkAuthorizerTest
         @Override
         void processBatch(BatchStatement statement)
         {
-            statement.executeInternal(QueryState.forInternalCalls(), QueryOptions.DEFAULT);
-        }
-    }
-
-    private static class LocalCassandraRoleManager extends CassandraRoleManager
-    {
-        ResultMessage.Rows select(SelectStatement statement, QueryOptions options)
-        {
-            return statement.executeInternal(QueryState.forInternalCalls(), options);
-        }
-
-        UntypedResultSet process(String query, ConsistencyLevel consistencyLevel) throws RequestValidationException, RequestExecutionException
-        {
-            return QueryProcessor.executeInternal(query);
+            statement.executeLocally(QueryState.forInternalCalls(), QueryOptions.DEFAULT);
         }
     }
 
@@ -91,7 +78,7 @@ public class CassandraNetworkAuthorizerTest
     {
         ResultMessage.Rows select(SelectStatement statement, QueryOptions options)
         {
-            return statement.executeInternal(QueryState.forInternalCalls(), options);
+            return statement.executeLocally(QueryState.forInternalCalls(), options);
         }
 
         void process(String query)
@@ -119,18 +106,14 @@ public class CassandraNetworkAuthorizerTest
                                new LocalCassandraAuthorizer(),
                                new LocalCassandraNetworkAuthorizer());
         setupSuperUser();
+        // not strictly necessary to init the cache here, but better to be explicit
+        Roles.initRolesCache(DatabaseDescriptor.getRoleManager(), () -> true);
     }
 
     @Before
-    public void clear() throws Exception
+    public void clear()
     {
         Keyspace.open(AUTH_KEYSPACE_NAME).getColumnFamilyStore(NETWORK_PERMISSIONS).truncateBlocking();
-    }
-
-
-    private static UntypedResultSet query(String q)
-    {
-        return QueryProcessor.executeInternal(q);
     }
 
     private static void assertNoDcPermRow(String username)
@@ -170,11 +153,14 @@ public class CassandraNetworkAuthorizerTest
 
     private static void auth(String query, Object... args)
     {
-        CQLStatement statement = QueryProcessor.parseStatement(String.format(query, args)).prepare().statement;
+        CQLStatement statement = QueryProcessor.parseStatement(String.format(query, args)).prepare(ClientState.forInternalCalls());
         assert statement instanceof CreateRoleStatement
                || statement instanceof AlterRoleStatement
                || statement instanceof DropRoleStatement;
         AuthenticationStatement authStmt = (AuthenticationStatement) statement;
+
+        // invalidate roles cache so that any changes to the underlying roles are picked up
+        Roles.clearCache();
         authStmt.execute(getClientState());
     }
 
@@ -185,7 +171,7 @@ public class CassandraNetworkAuthorizerTest
     }
 
     @Test
-    public void create() throws Exception
+    public void create()
     {
         String username = createName();
 
@@ -197,7 +183,7 @@ public class CassandraNetworkAuthorizerTest
     }
 
     @Test
-    public void alter() throws Exception
+    public void alter()
     {
 
         String username = createName();
@@ -206,7 +192,7 @@ public class CassandraNetworkAuthorizerTest
         // user should implicitly have access to all datacenters
         auth("CREATE ROLE %s WITH password = 'password' AND LOGIN = true", username);
         Assert.assertEquals(DCPermissions.all(), dcPerms(username));
-        assertNoDcPermRow(username);
+        assertDcPermRow(username);
 
         // unless explicitly restricted
         auth("ALTER ROLE %s WITH ACCESS TO DATACENTERS {'dc1', 'dc2'}", username);
@@ -237,23 +223,36 @@ public class CassandraNetworkAuthorizerTest
     }
 
     @Test
-    public void superUser() throws Exception
+    public void superUser()
     {
         String username = createName();
         auth("CREATE ROLE %s WITH password = 'password' AND LOGIN = true AND ACCESS TO DATACENTERS {'dc1'}", username);
         Assert.assertEquals(DCPermissions.subset("dc1"), dcPerms(username));
         assertDcPermRow(username, "dc1");
 
+        // clear the roles cache to lose the (non-)superuser status for the user
+        Roles.clearCache();
         auth("ALTER ROLE %s WITH superuser = true", username);
         Assert.assertEquals(DCPermissions.all(), dcPerms(username));
     }
 
     @Test
-    public void cantLogin() throws Exception
+    public void cantLogin()
     {
         String username = createName();
         auth("CREATE ROLE %s", username);
         Assert.assertEquals(DCPermissions.none(), dcPerms(username));
+    }
 
+    @Test
+    public void getLoginPrivilegeFromRolesCache() throws Exception
+    {
+        String username = createName();
+        auth("CREATE ROLE %s", username);
+        long readCount = getReadCount();
+        dcPerms(username);
+        Assert.assertEquals(++readCount, getReadCount());
+        dcPerms(username);
+        Assert.assertEquals(readCount, getReadCount());
     }
 }

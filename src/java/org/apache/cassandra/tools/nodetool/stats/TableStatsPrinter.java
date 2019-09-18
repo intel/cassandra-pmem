@@ -73,8 +73,9 @@ public class TableStatsPrinter
 
         protected void printStatsTable(StatsTable table, String tableDisplayName, String indent, PrintStream out)
         {
-            out.println(indent + "Table" + (table.isIndex ? " (index): " + table.tableName : ": ") + tableDisplayName);
+            out.println(indent + "Table" + (table.isIndex ? " (index): " : ": ") + tableDisplayName);
             out.println(indent + "SSTable count: " + table.sstableCount);
+            out.println(indent + "Old SSTable count: " + table.oldSSTableCount);
             if (table.isLeveledSstable)
                 out.println(indent + "SSTables in each level: [" + String.join(", ",
                                                                           table.sstablesInEachLevel) + "]");

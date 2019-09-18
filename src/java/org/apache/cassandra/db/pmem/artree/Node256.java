@@ -12,11 +12,6 @@ public class Node256 extends InternalNode {
     private static final int  BLANK_RADIX_CHILD_INDEX = 256;
     private static final int  MAX_CAPACITY = 257;
 
-    /*Node256(TransactionalHeap heap) {
-        super(heap, SIZE);
-        //initType(Node.NODE256_TYPE);
-    }*/
-
     Node256(TransactionalHeap heap, TransactionalUnboundedMemoryBlock mb) {
         super(heap, mb);
     }
@@ -73,7 +68,10 @@ public class Node256 extends InternalNode {
             entries[index++] = new NodeEntry((byte)0, getChildAtIndex(BLANK_RADIX_CHILD_INDEX));
         }
         Node n;
-        for (int i=0; i < 256; i++) {
+        for (int i=128; i < 256; i++) {
+            if (findValueAtIndex(i) != 0) entries[index++] = new NodeEntry((byte)(i-128), getChildAtIndex(i));
+        }
+        for (int i=0; i < 128; i++) {
             if (findValueAtIndex(i) != 0) entries[index++] = new NodeEntry((byte)(i-128), getChildAtIndex(i));
         }
         return entries;
@@ -94,7 +92,6 @@ public class Node256 extends InternalNode {
         if (radix == null) index = BLANK_RADIX_CHILD_INDEX;
         else index = findChildIndex(radix);
         if (findValueAtIndex(index) != 0) {
-            //mb.addToTransaction(0, this.SIZE);
             //delete child at 'index'
             mb.setLong(CHILDREN_OFFSET + index * Long.BYTES, 0L);
             decChildrenCount();
@@ -105,10 +102,8 @@ public class Node256 extends InternalNode {
     Byte findLowestRadix(byte radix, boolean visited) {
         int cmp = visited ? radix : Byte.MIN_VALUE;
         int lowest = Byte.MAX_VALUE;
-        // System.out.println("visited is "+visited+", need to find lowest radix between "+cmp+" and "+lowest);
         for (int i=cmp + 1; i<=lowest; i++) {
             if (findValueAtIndex(i + 128) != 0L) {
-                // System.out.println("Returning "+(byte)i);
                 return (byte)i;
             }
         }
@@ -131,10 +126,6 @@ public class Node256 extends InternalNode {
         if (index == -1) return;
         mb.setLong(CHILDREN_OFFSET + index * Long.BYTES, child.address());
     }
-
-    /*private void initValueAtIndex(int index, long value) {
-        mb.setDurableLong(CHILDREN_OFFSET + index * Long.BYTES, value);
-    }*/
 
     @Override
     short capacity() { return (short)MAX_CAPACITY; }

@@ -32,6 +32,7 @@ import org.apache.commons.math3.stat.descriptive.SummaryStatistics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
@@ -69,6 +70,20 @@ public class TokenAllocation
             if (ns.getStandardDeviation() > os.getStandardDeviation())
                 logger.warn("Unexpected growth in standard deviation after allocation.");
         }
+        return tokens;
+    }
+
+    public static Collection<Token> allocateTokens(final TokenMetadata tokenMetadata,
+                                                   final int replicas,
+                                                   final InetAddressAndPort endpoint,
+                                                   int numTokens)
+    {
+        TokenMetadata tokenMetadataCopy = tokenMetadata.cloneOnlyTokenMap();
+        StrategyAdapter strategy = getStrategy(tokenMetadataCopy, replicas, endpoint);
+        Collection<Token> tokens = create(tokenMetadata, strategy).addUnit(endpoint, numTokens);
+        tokens = adjustForCrossDatacenterClashes(tokenMetadata, strategy, tokens);
+        logger.warn("Selected tokens {}", tokens);
+        // SummaryStatistics is not implemented for `allocate_tokens_for_local_replication_factor`
         return tokens;
     }
 
@@ -113,7 +128,7 @@ public class TokenAllocation
     {
         double size = current.size(next);
         Token representative = current.getPartitioner().midpoint(current, next);
-        for (InetAddressAndPort n : rs.calculateNaturalEndpoints(representative, tokenMetadata))
+        for (InetAddressAndPort n : rs.calculateNaturalReplicas(representative, tokenMetadata).endpoints())
         {
             Double v = ownership.get(n);
             ownership.put(n, v != null ? v + size : size);
@@ -169,7 +184,7 @@ public class TokenAllocation
 
     static StrategyAdapter getStrategy(final TokenMetadata tokenMetadata, final SimpleStrategy rs, final InetAddressAndPort endpoint)
     {
-        final int replicas = rs.getReplicationFactor();
+        final int replicas = rs.getReplicationFactor().allReplicas;
 
         return new StrategyAdapter()
         {
@@ -196,8 +211,18 @@ public class TokenAllocation
     static StrategyAdapter getStrategy(final TokenMetadata tokenMetadata, final NetworkTopologyStrategy rs, final IEndpointSnitch snitch, final InetAddressAndPort endpoint)
     {
         final String dc = snitch.getDatacenter(endpoint);
-        final int replicas = rs.getReplicationFactor(dc);
+        final int replicas = rs.getReplicationFactor(dc).allReplicas;
+        return getStrategy(tokenMetadata, replicas, snitch, endpoint);
+    }
 
+    static StrategyAdapter getStrategy(final TokenMetadata tokenMetadata, final int replicas, final InetAddressAndPort endpoint)
+    {
+        return getStrategy(tokenMetadata, replicas, DatabaseDescriptor.getEndpointSnitch(), endpoint);
+    }
+
+    static StrategyAdapter getStrategy(final TokenMetadata tokenMetadata, final int replicas, final IEndpointSnitch snitch, final InetAddressAndPort endpoint)
+    {
+        final String dc = snitch.getDatacenter(endpoint);
         if (replicas == 0 || replicas == 1)
         {
             // No replication, each node is treated as separate.
@@ -224,7 +249,11 @@ public class TokenAllocation
         }
 
         Topology topology = tokenMetadata.getTopology();
-        int racks = topology.getDatacenterRacks().get(dc).asMap().size();
+
+        // if topology hasn't been setup yet for this endpoint+rack then treat it as a separate unit
+        int racks = topology.getDatacenterRacks().get(dc) != null && topology.getDatacenterRacks().get(dc).containsKey(snitch.getRack(endpoint))
+                ? topology.getDatacenterRacks().get(dc).asMap().size()
+                : 1;
 
         if (racks >= replicas)
         {

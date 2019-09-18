@@ -12,9 +12,16 @@ public class Node4 extends InternalNode {
     static final long CHILDREN_OFFSET = Node.HEADER_SIZE;
     private static final int  MAX_CAPACITY = 4;
 
+    static String format(byte[] arr) {
+        StringBuffer sb = new StringBuffer("[ ");
+        for (int i=0; i<arr.length; i++) {
+            sb.append(arr[i] + " " );
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
     Node4(TransactionalHeap heap) {
-        //super(heap, SIZE);
-        //initType(Node.NODE4_TYPE);
         super(heap, SIZE, (Range range) -> {
             range.setByte(Node.NODE_TYPE_OFFSET, Node.NODE4_TYPE);
         });
@@ -67,9 +74,7 @@ public class Node4 extends InternalNode {
 
     @Override
     byte[] getRadices() {
-        //`byte[] ret = new byte[MAX_CAPACITY];
         byte[] ret = new byte[getChildrenCount()];
-        //mb.copyToArray(RADIX_OFFSET, ret, 0, MAX_CAPACITY);
         mb.copyToArray(RADIX_OFFSET, ret, 0, ret.length);
         return ret;
     }
@@ -86,7 +91,7 @@ public class Node4 extends InternalNode {
         for (int i=0; i < entries.length; i++) {
             if (i != blankIndex) entries[index++] = new NodeEntry(radices[i], getChildAtIndex(i));
         }
-        Arrays.sort(entries, (hasBlank) ? 1 : 0, entries.length, (x, y)-> Byte.compare(x.radix, y.radix));
+        Arrays.sort(entries, (hasBlank) ? 1 : 0, entries.length, (x, y)-> Integer.compareUnsigned(Byte.toUnsignedInt(x.radix), Byte.toUnsignedInt(y.radix)));
         return entries;
     }
 
@@ -119,8 +124,6 @@ public class Node4 extends InternalNode {
         else index = findChildIndex(radix);
 
         if (index != -1) {
-            //mb.addToTransaction(0, this.SIZE);
-            //mb.addToTransaction(Node.HEADER_SIZE, this.SIZE - Node.HEADER_SIZE);
             mb.withRange(Node.HEADER_SIZE, this.SIZE - Node.HEADER_SIZE, (Range range) -> {
                 //delete radix
                 range.copyFromMemoryBlock(mb, RADIX_OFFSET + index + 1, RADIX_OFFSET + index, MAX_CAPACITY - index - 1);        

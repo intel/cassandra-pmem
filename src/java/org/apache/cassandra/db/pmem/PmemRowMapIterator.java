@@ -163,7 +163,10 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
         {
             ARTree.Entry nextEntry = pmemRowTreeIterator.next();
             if (nextEntry == null)
+            {
+     //           ack.run();
                 return endOfData();
+            }
             ByteBuffer clusteringbuffer = ByteBuffer.wrap(nextEntry.getKey());
             Clustering clustering = Clustering.serializer.deserialize(clusteringbuffer, -1, metadata.comparator.subtypes());
             if ((namesFilter != null) && (namesFilter instanceof ClusteringIndexSliceFilter)) //Not the slice we are looking for
@@ -204,7 +207,6 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
                 builder.newRow(clustering);
 
                 Unfiltered unfiltered = PmemRowSerializer.serializer.deserialize(memoryBlockDataInputPlus, serializationHeader, helper, builder);
-                ack.run();
                 if((namesFilter != null) && (namesFilter instanceof ClusteringIndexNamesFilter) && (((ClusteringIndexNamesFilter)namesFilter).requestedRows().first().size() >0))
                 {
                     if (namesFilter.selects(clustering))
@@ -218,9 +220,11 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
             }
             catch (IOException e)
             {
+                ack.cancel(true);
                 throw new IOError(e);
             }
         }
+  //      ack.run();
         return endOfData();
     }
 
@@ -258,5 +262,11 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
     public EncodingStats stats()
     {
         return EncodingStats.NO_STATS;
+    }
+
+    @Override
+    public void close()
+    {
+        ack.run();
     }
 }

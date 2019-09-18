@@ -36,6 +36,9 @@ import net.openhft.chronicle.queue.ExcerptTailer;
 import net.openhft.chronicle.queue.RollCycles;
 import net.openhft.chronicle.wire.WireOut;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.audit.AuditLogOptions;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.util.FileUtils;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -46,7 +49,7 @@ public class BinLogTest
 {
     public static Path tempDir() throws Exception
     {
-        File f = File.createTempFile("foo", "bar");
+        File f = FileUtils.createTempFile("foo", "bar");
         f.delete();
         f.mkdir();
         return Paths.get(f.getPath());
@@ -62,7 +65,7 @@ public class BinLogTest
     public void setUp() throws Exception
     {
         path = tempDir();
-        binLog = new BinLog(path, RollCycles.TEST_SECONDLY, 10, 1024 * 1024 * 128);
+        binLog = new BinLog(path, RollCycles.TEST_SECONDLY, 10, new DeletingArchiver(1024 * 1024 * 128));
         binLog.start();
     }
 
@@ -82,25 +85,25 @@ public class BinLogTest
     @Test(expected = NullPointerException.class)
     public void testConstructorNullPath() throws Exception
     {
-        new BinLog(null, RollCycles.TEST_SECONDLY, 1, 1);
+        new BinLog(null, RollCycles.TEST_SECONDLY, 1, new DeletingArchiver(1));
     }
 
     @Test(expected = NullPointerException.class)
     public void testConstructorNullRollCycle() throws Exception
     {
-        new BinLog(tempDir(), null, 1, 1);
+        new BinLog(tempDir(), null, 1, new DeletingArchiver(1));
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testConstructorZeroWeight() throws Exception
     {
-        new BinLog(tempDir(), RollCycles.TEST_SECONDLY, 0, 1);
+        new BinLog(tempDir(), RollCycles.TEST_SECONDLY, 0, new DeletingArchiver(1));
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testConstructorLogSize() throws Exception
     {
-        new BinLog(tempDir(), RollCycles.TEST_SECONDLY, 1, 0);
+        new BinLog(tempDir(), RollCycles.TEST_SECONDLY, 0, new DeletingArchiver(1));
     }
 
     /**
@@ -114,7 +117,7 @@ public class BinLogTest
         AtomicInteger releaseCount = new AtomicInteger();
         binLog.put(new BinLog.ReleaseableWriteMarshallable()
         {
-            protected void release()
+            public void release()
             {
                 releaseCount.incrementAndGet();
             }
@@ -139,7 +142,7 @@ public class BinLogTest
 
             }
 
-            protected void release()
+            public void release()
             {
                 releaseCount.incrementAndGet();
             }
@@ -174,7 +177,7 @@ public class BinLogTest
         Semaphore released = new Semaphore(0);
         binLog.sampleQueue.put(new BinLog.ReleaseableWriteMarshallable()
         {
-            protected void release()
+            public void release()
             {
                 released.release();
             }
@@ -220,7 +223,7 @@ public class BinLogTest
         {
             binLog.put(new BinLog.ReleaseableWriteMarshallable()
             {
-                protected void release()
+                public void release()
                 {
                 }
 
@@ -296,7 +299,7 @@ public class BinLogTest
         {
             assertTrue(binLog.offer(new BinLog.ReleaseableWriteMarshallable()
             {
-                protected void release()
+                public void release()
                 {
                 }
 
@@ -344,7 +347,7 @@ public class BinLogTest
     public void testCleanupOnOversize() throws Exception
     {
         tearDown();
-        binLog = new BinLog(path, RollCycles.TEST_SECONDLY, 10000, 1);
+        binLog = new BinLog(path, RollCycles.TEST_SECONDLY, 1, new DeletingArchiver(10000));
         binLog.start();
         for (int ii = 0; ii < 5; ii++)
         {
@@ -412,7 +415,7 @@ public class BinLogTest
     {
         return new BinLog.ReleaseableWriteMarshallable()
         {
-            protected void release()
+            public void release()
             {
                 //Do nothing
             }

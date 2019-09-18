@@ -18,40 +18,88 @@
 package org.apache.cassandra.service.reads;
 
 import java.nio.ByteBuffer;
+import java.util.Collection;
 import java.util.concurrent.TimeUnit;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.ReadCommand;
+import org.apache.cassandra.db.ReadResponse;
+import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
-import org.apache.cassandra.net.MessageIn;
-import org.apache.cassandra.service.reads.repair.ReadRepair;
-import org.apache.cassandra.tracing.TraceState;
+import org.apache.cassandra.locator.Endpoints;
+import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.ReplicaPlan;
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.service.reads.repair.NoopReadRepair;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
-public class DigestResolver extends ResponseResolver
+import static com.google.common.collect.Iterables.any;
+
+public class DigestResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<E>> extends ResponseResolver<E, P>
 {
-    private volatile ReadResponse dataResponse;
+    private volatile Message<ReadResponse> dataResponse;
 
-    public DigestResolver(Keyspace keyspace, ReadCommand command, ConsistencyLevel consistency, ReadRepair readRepair, int maxResponseCount)
+    public DigestResolver(ReadCommand command, ReplicaPlan.Shared<E, P> replicaPlan, long queryStartNanoTime)
     {
-        super(keyspace, command, consistency, readRepair, maxResponseCount);
+        super(command, replicaPlan, queryStartNanoTime);
         Preconditions.checkArgument(command instanceof SinglePartitionReadCommand,
                                     "DigestResolver can only be used with SinglePartitionReadCommand commands");
     }
 
     @Override
-    public void preprocess(MessageIn<ReadResponse> message)
+    public void preprocess(Message<ReadResponse> message)
     {
         super.preprocess(message);
-        if (dataResponse == null && !message.payload.isDigestResponse())
-            dataResponse = message.payload;
+        Replica replica = replicaPlan().getReplicaFor(message.from());
+        if (dataResponse == null && !message.payload.isDigestResponse() && replica.isFull())
+            dataResponse = message;
+    }
+
+    @VisibleForTesting
+    public boolean hasTransientResponse()
+    {
+        return hasTransientResponse(responses.snapshot());
+    }
+
+    private boolean hasTransientResponse(Collection<Message<ReadResponse>> responses)
+    {
+        return any(responses,
+                msg -> !msg.payload.isDigestResponse()
+                        && replicaPlan().getReplicaFor(msg.from()).isTransient());
     }
 
     public PartitionIterator getData()
     {
         assert isDataPresent();
-        return UnfilteredPartitionIterators.filter(dataResponse.makeIterator(command), command.nowInSec());
+
+        Collection<Message<ReadResponse>> responses = this.responses.snapshot();
+
+        if (!hasTransientResponse(responses))
+        {
+            return UnfilteredPartitionIterators.filter(dataResponse.payload.makeIterator(command), command.nowInSec());
+        }
+        else
+        {
+            // This path can be triggered only if we've got responses from full replicas and they match, but
+            // transient replica response still contains data, which needs to be reconciled.
+            DataResolver<E, P> dataResolver
+                    = new DataResolver<>(command, replicaPlan, NoopReadRepair.instance, queryStartNanoTime);
+
+            dataResolver.preprocess(dataResponse);
+            // Reconcile with transient replicas
+            for (Message<ReadResponse> response : responses)
+            {
+                Replica replica = replicaPlan().getReplicaFor(response.from());
+                if (replica.isTransient())
+                    dataResolver.preprocess(response);
+            }
+
+            return dataResolver.resolve();
+        }
     }
 
     public boolean responsesMatch()
@@ -60,11 +108,17 @@ public class DigestResolver extends ResponseResolver
 
         // validate digests against each other; return false immediately on mismatch.
         ByteBuffer digest = null;
-        for (MessageIn<ReadResponse> message : responses)
-        {
-            ReadResponse response = message.payload;
+        Collection<Message<ReadResponse>> snapshot = responses.snapshot();
+        if (snapshot.size() <= 1)
+            return true;
 
-            ByteBuffer newDigest = response.digest(command);
+        // TODO: should also not calculate if only one full node
+        for (Message<ReadResponse> message : snapshot)
+        {
+            if (replicaPlan().getReplicaFor(message.from()).isTransient())
+                continue;
+
+            ByteBuffer newDigest = message.payload.digest(command);
             if (digest == null)
                 digest = newDigest;
             else if (!digest.equals(newDigest))
@@ -81,5 +135,32 @@ public class DigestResolver extends ResponseResolver
     public boolean isDataPresent()
     {
         return dataResponse != null;
+    }
+
+    public DigestResolverDebugResult[] getDigestsByEndpoint()
+    {
+        DigestResolverDebugResult[] ret = new DigestResolverDebugResult[responses.size()];
+        for (int i = 0; i < responses.size(); i++)
+        {
+            Message<ReadResponse> message = responses.get(i);
+            ReadResponse response = message.payload;
+            String digestHex = ByteBufferUtil.bytesToHex(response.digest(command));
+            ret[i] = new DigestResolverDebugResult(message.from(), digestHex, message.payload.isDigestResponse());
+        }
+        return ret;
+    }
+
+    public static class DigestResolverDebugResult
+    {
+        public InetAddressAndPort from;
+        public String digestHex;
+        public boolean isDigestResponse;
+
+        private DigestResolverDebugResult(InetAddressAndPort from, String digestHex, boolean isDigestResponse)
+        {
+            this.from = from;
+            this.digestHex = digestHex;
+            this.isDigestResponse = isDigestResponse;
+        }
     }
 }

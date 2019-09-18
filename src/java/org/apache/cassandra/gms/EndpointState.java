@@ -50,7 +50,7 @@ public class EndpointState
     private volatile long updateTimestamp;
     private volatile boolean isAlive;
 
-    EndpointState(HeartBeatState initialHbState)
+    public EndpointState(HeartBeatState initialHbState)
     {
         this(initialHbState, new EnumMap<ApplicationState, VersionedValue>(ApplicationState.class));
     }
@@ -142,6 +142,11 @@ public class EndpointState
     {
         VersionedValue rpcState = getApplicationState(ApplicationState.RPC_READY);
         return rpcState != null && Boolean.parseBoolean(rpcState.value);
+    }
+
+    public boolean isNormalState()
+    {
+        return getStatus().equals(VersionedValue.STATUS_NORMAL);
     }
 
     public String getStatus()

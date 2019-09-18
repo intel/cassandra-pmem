@@ -20,11 +20,12 @@ package org.apache.cassandra.db.partitions;
 import java.util.*;
 
 import org.apache.cassandra.db.EmptyIterators;
+import org.apache.cassandra.db.transform.FilteredPartitions;
 import org.apache.cassandra.db.transform.MorePartitions;
 import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.utils.AbstractIterator;
 
-import org.apache.cassandra.db.SinglePartitionReadCommand;
+import org.apache.cassandra.db.SinglePartitionReadQuery;
 import org.apache.cassandra.db.rows.*;
 
 public abstract class PartitionIterators
@@ -32,15 +33,15 @@ public abstract class PartitionIterators
     private PartitionIterators() {}
 
     @SuppressWarnings("resource") // The created resources are returned right away
-    public static RowIterator getOnlyElement(final PartitionIterator iter, SinglePartitionReadCommand command)
+    public static RowIterator getOnlyElement(final PartitionIterator iter, SinglePartitionReadQuery query)
     {
         // If the query has no results, we'll get an empty iterator, but we still
         // want a RowIterator out of this method, so we return an empty one.
         RowIterator toReturn = iter.hasNext()
                              ? iter.next()
-                             : EmptyIterators.row(command.metadata(),
-                                                  command.partitionKey(),
-                                                  command.clusteringIndexFilter().isReversed());
+                             : EmptyIterators.row(query.metadata(),
+                                                  query.partitionKey(),
+                                                  query.clusteringIndexFilter().isReversed());
 
         // Note that in general, we should wrap the result so that it's close method actually
         // close the whole PartitionIterator.
@@ -66,7 +67,7 @@ public abstract class PartitionIterators
 
         class Extend implements MorePartitions<PartitionIterator>
         {
-            int i = 1;
+            int i = 0;
             public PartitionIterator moreContents()
             {
                 if (i >= iterators.size())
@@ -74,24 +75,13 @@ public abstract class PartitionIterators
                 return iterators.get(i++);
             }
         }
-        return MorePartitions.extend(iterators.get(0), new Extend());
+
+        return MorePartitions.extend(EmptyIterators.partition(), new Extend());
     }
 
     public static PartitionIterator singletonIterator(RowIterator iterator)
     {
         return new SingletonPartitionIterator(iterator);
-    }
-
-    public static void consume(PartitionIterator iterator)
-    {
-        while (iterator.hasNext())
-        {
-            try (RowIterator partition = iterator.next())
-            {
-                while (partition.hasNext())
-                    partition.next();
-            }
-        }
     }
 
     /**
