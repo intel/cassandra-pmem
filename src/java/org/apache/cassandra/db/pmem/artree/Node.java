@@ -1,4 +1,9 @@
-// TODO: COPYRIGHT HEADER
+/*
+ * Copyright (C) 2018-2020 Intel Corporation
+ *
+ * SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
+ *
+ */
 
 package org.apache.cassandra.db.pmem.artree;
 import java.nio.ByteBuffer;

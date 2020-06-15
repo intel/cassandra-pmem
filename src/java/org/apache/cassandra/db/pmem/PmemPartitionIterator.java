@@ -82,7 +82,7 @@ public class PmemPartitionIterator extends AbstractUnfilteredPartitionIterator
     public UnfilteredRowIterator next()
     {
         ARTree.Entry nextEntry = pmemPartitionIterator.next();
-        Token token = new Murmur3Partitioner.LongToken(Longs.fromByteArray(nextEntry.getKey()));
+        Token token = new Murmur3Partitioner.LongToken(ARTree.decodeLong(nextEntry.getKey()));
         PmemPartition pMemPartition = PmemPartition.load(heap,token,nextEntry.getValue());
         try
         {

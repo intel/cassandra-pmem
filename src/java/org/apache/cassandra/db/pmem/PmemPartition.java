@@ -217,7 +217,10 @@ public class PmemPartition
             return EmptyIterators.unfilteredRow(tableMetadata, key, false);;
         MemoryBlockDataInputPlus inputPlus = new MemoryBlockDataInputPlus(block,heap);
         //get artree from rowmap
-        return PmemRowMapIterator.create(tableMetadata,inputPlus,rowmapAddress, heap, key, filter,  partitionDelete, dataRange);
+        UnfilteredRowIterator unfilteredRowIterator = PmemRowMapIterator.create(tableMetadata,inputPlus,rowmapAddress, heap, key, filter,  partitionDelete, dataRange);
+        if(unfilteredRowIterator != null)
+            return unfilteredRowIterator;
+        return EmptyIterators.unfilteredRow(tableMetadata, key, false);
     }
 
     public static PmemPartition create(PartitionUpdate update, TransactionalHeap heap, Transaction tx) throws IOException

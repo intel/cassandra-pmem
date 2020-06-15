@@ -1,4 +1,10 @@
-// TODO: COPYRIGHT HEADER
+/*
+ * Copyright (C) 2018-2020 Intel Corporation
+ *
+ * SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
+ *
+ */
+
 
 package org.apache.cassandra.db.pmem.artree;
 
@@ -15,6 +21,8 @@ public class ARTree {
     final TransactionalHeap heap;
     private Root root;
     private int maxKeyLen;
+    static final long LONG_MASK = 1L << 63;
+    static final int INT_MASK = 1 << 31;
 
     public ARTree(TransactionalHeap heap) {
         this.heap = heap;   // maybe from TreeManager?
@@ -39,20 +47,26 @@ public class ARTree {
         return root.address();
     }
 
+    protected static int compareUnsigned(byte b1, byte b2) {
+        return Integer.compareUnsigned(Byte.toUnsignedInt(b1), Byte.toUnsignedInt(b2));
+    }
+
     public enum Operation {
         DELETE_NODE,
         END,
         NO_OP;
     }
 
-    //byte[] convertToByteArray(long value) {
-    public static byte[] radixize(long value) {
-        byte[] ret = new byte[8];
-        value = value ^ 0x8000000000000000L;
-        for (int i = 0; i < 8; i++) {
-            ret[i] = (byte)(value >> ((7-i)*8));
-        }
-        return ret;
+    public static byte[] encodeInt(int val) {
+        return ByteBuffer.allocate(Integer.BYTES).putLong(val ^ INT_MASK).array();
+    }
+
+    public static byte[] encodeLong(long val) {
+        return ByteBuffer.allocate(Long.BYTES).putLong(val ^ LONG_MASK).array();
+    }
+
+    public static long decodeLong(byte[] bytes) {
+        return ByteBuffer.wrap(bytes).getLong() ^ LONG_MASK;
     }
 
     // Who should derive the token from the DecoratedKey, the ARTree or the caller?
@@ -185,13 +199,7 @@ public class ARTree {
     public long get(byte[] radixKey) {
         Node node;
         if ((node = root.getChild()) != null) {
-            /*if (node.isLeaf()) {
-                if ((node.getPrefixLength() == radixKey.length) && (node.checkPrefix(radixKey, 0) == radixKey.length))
-                    return ((SimpleLeaf)node).getValue();
-                else
-                return 0;
-            } else*/
-                return search(root.getChild(), radixKey, 0, null, null);
+            return search(root.getChild(), radixKey, 0, null, null);
         }
         return 0;
     }
@@ -207,7 +215,7 @@ public class ARTree {
             return 0;
         }
         if (node.isLeaf())
-            return ((SimpleLeaf)node).getValue();
+            return ((depth + matchedLength) == key.length) ? ((SimpleLeaf)node).getValue() : 0;
         else {
             depth += matchedLength;
             boolean blank = (depth == key.length);
@@ -257,12 +265,10 @@ public class ARTree {
     }
 
     public void forEach(BiFunction<byte[], Long, Operation> fcn) {
-        System.out.println("vacuuming...");
         new InternalIterator(fcn, new byte[0]);
     }
 
     public void forEach(BiFunction<byte[], Long, Operation> fcn, byte[] firstKey) {
-        System.out.println("vacuuming...");
         new InternalIterator(fcn, firstKey);
     }
 
@@ -283,19 +289,18 @@ public class ARTree {
         return new EntryIterator();
     }
 
-    public EntryIterator getEntryIterator(byte[] firstKey) {
-        return new EntryIterator(firstKey, true, null, false);
+    public EntryIterator getHeadEntryIterator(byte[] lastKey, boolean lastInclusive) {
+        if (lastKey == null) throw new IllegalArgumentException();
+        return new EntryIterator(lastKey, lastInclusive);
     }
 
-    public EntryIterator getEntryIterator(byte[] firstKey, byte[] lastKey) {
-        return new EntryIterator(firstKey, true, lastKey, false);
-    }
-
-    public EntryIterator getEntryIterator(byte[] firstKey, boolean firstInclusive) {
+    public EntryIterator getTailEntryIterator(byte[] firstKey, boolean firstInclusive) {
+        if (firstKey == null) throw new IllegalArgumentException();
         return new EntryIterator(firstKey, firstInclusive, null, false);
     }
 
     public EntryIterator getEntryIterator(byte[] firstKey, boolean firstInclusive, byte[] lastKey, boolean lastInclusive) {
+        if (firstKey == null || lastKey == null) throw new IllegalArgumentException();
         return new EntryIterator(firstKey, firstInclusive, lastKey, lastInclusive);
     }
 
@@ -311,20 +316,19 @@ public class ARTree {
             this.hasBlank = hasBlank;
         }
 
-        public StackItem(NodeEntry[] entries, int prefixLen, boolean hasBlank, Byte radix) {
+        public StackItem(NodeEntry[] entries, int prefixLen, Byte radix) {
             this.entries=entries;
             this.prefixLen=prefixLen;
-            this.hasBlank=hasBlank;
-            if (!hasBlank && radix != entries[0].radix) calcIndex(radix);
+            this.hasBlank=false;
+            if (radix != entries[0].radix) this.index = calcIndex(radix);
         }
-
-        void calcIndex(byte radix) {
-            for (int i = 1; i < entries.length; i++) {
-                if (entries[i].radix == radix) {
-                    index = i;
-                    break;
-                }
+    
+        int calcIndex(byte radix) {
+            int i;
+            for (i = 0; i < entries.length; i++) {
+                if (compareUnsigned(radix, entries[i].radix) <= 0) break;
             }
+            return i;
         }
 
         public int prefixLen() {
@@ -399,14 +403,10 @@ public class ARTree {
         }
 
         void findLowestKey(Node node, int depth) {
-            // System.out.println("FLK: depth is "+depth);
             boolean blank = false;
             visited = false;
             if (node == null) return;
             if (node.isLeaf()) {
-                 // System.out.println("node is leaf! value->"+((SimpleLeaf)node).getValue());
-                 // System.out.println("next Key is "+ (new String(key, 0, depth))+" depth is "+depth);
-                //if (!found) found = true;
                 return;
             }
             while(true) {
@@ -417,7 +417,6 @@ public class ARTree {
                     int matchedLength = node.checkPrefix(key, depth);
                     if (matchedLength != node.getPrefixLength()) {
                         found = true;
-                        // System.out.println("not a match!");
                         break;
                     }
                     else {
@@ -439,34 +438,21 @@ public class ARTree {
                     if (b == null) break;
                     key[depth] = b;
                 }
-                // System.out.println("blank is "+blank);
                 next = blank ? ((InternalNode)node).findBlankRadixChild() : ((InternalNode)node).findChild(key[depth++]);
-                // System.out.println("Descending: Parent is "+node.address()+" Child is "+next.address()+" radix is "+new String(new byte[]{key[depth-1]})+" depth is "+depth);
                 }
-                // System.out.println("Descending: Parent is "+node.address()+" Child is "+next.address()+" radix is "+new String(new byte[]{key[depth-1]})+" depth is "+depth);
                 if (depth == 0 || next == null) break;
                 findLowestKey(next, depth);
                 // Ascending
                 if (!blank) visited = true;
-                // System.out.println("Ascending: Parent is "+node.address()+" Child is "+((next == null) ? "null" : next.address())+" partial key is "+new String(Arrays.copyOf(key, depth))+" depth is "+depth);
                 if (next.isLeaf()) {
                     byte[] leafPrefix = next.getPrefix();
                     if (!found) {
                         found = true;
-                        // System.out.println("leafprefixLen is "+leafPrefix.length);
-                        // System.out.println("printing leafprefix ...");
                         for (int i=0; i<leafPrefix.length; i++) {
                             System.out.println(Long.toHexString(leafPrefix[i]));
                         }
-                        // System.out.println("depth is "+depth);
-                        // System.out.println("printing key ...");
-                        /*for (int i=depth; i<(depth + leafPrefix.length); i++) {
-                             System.out.println(Long.toHexString(key[i]));
-                        }*/
                         int matchedLength = next.checkPrefix(key, depth);
                         if (matchedLength != leafPrefix.length) {
-                            // System.out.println("leaf prefix was not a match! matchedlen is "+matchedLength);
-                            //if (firstKey.length <= depth || Bytes.compare
                             depth-=prefix.length; if (!blank) depth--;
                             continue;
                         }
@@ -480,7 +466,6 @@ public class ARTree {
                         final Node fnext = next;
                         final boolean fblank = blank;
                         Transaction.run(heap, ()-> {
-                            // System.out.println("deleting child, addr: "+fnext.address()+" with radix "+new String(new byte[]{key[d - leafPrefix.length - 1]}));
                              fnext.free();
                             if (fblank) ((InternalNode)node).deleteChild(null);
                             else {((InternalNode)node).deleteChild(key[d - leafPrefix.length - 1]);}
@@ -488,7 +473,6 @@ public class ARTree {
                     }
                     else if (op == Operation.END) break;
                 } else if (((InternalNode)next).getChildrenCount() == 0) {
-                    // System.out.println("internal node: "+next.address()+" has no children so  deleting. parent: "+node.address()+" radix is "+new String(new byte[]{key[depth - 1]}));
                     final int d = depth;
                     final Node fnext = next;
                     Transaction.run(heap, ()-> {
@@ -526,7 +510,6 @@ public class ARTree {
                     keyBuf = ByteBuffer.allocate(100);
                     iterate(first);
                     cursor = cache.getFirst();
-                //System.out.println("constructor: Cache Size is "+cache.size()+"; cursor size is "+cursor.length()+" index is "+index+" "+keyBuf);
                     next();
                 }
             }
@@ -535,7 +518,7 @@ public class ARTree {
         void buildCache(Node parent, Node child, Byte radix, Consumer<Long> cleaner) {
             StackItem item;
             if (radix == null) item = new StackItem(((InternalNode)parent).getEntries(), parent.getPrefixLength(), true);
-             else item = new StackItem(((InternalNode)parent).getEntries(), parent.getPrefixLength(), radix == null, radix);
+            else item = new StackItem(((InternalNode)parent).getEntries(), parent.getPrefixLength(), radix);
             cache.addLast(item);
             byte[] ba = parent.getPrefix();
             if (ba.length > 0) keyBuf.put(ba);
@@ -543,6 +526,12 @@ public class ARTree {
             else keyBuf.position(keyBuf.position() + 1);
         }
 
+        public EntryIterator(byte[] lastKey, boolean lastInclusive) {
+            this();
+            this.lastKey = lastKey;
+            this.lastInclusive = lastInclusive;
+        }
+    
         public EntryIterator(byte[] firstKey, boolean firstInclusive, byte[] lastKey, boolean lastInclusive) {
             cache = new ArrayDeque<>();
             Node first = root.getChild();
@@ -552,31 +541,47 @@ public class ARTree {
             {
                 if (first.isLeaf()) {
                     SimpleLeaf leaf = (SimpleLeaf)first;
-                    next = (Arrays.equals(firstKey, first.getPrefix())) ? new Entry(first.getPrefix(), leaf.getValue()) : null;
-                }
-                else if (firstKey == null) {
-                    keyBuf = ByteBuffer.allocate(100);
-                    iterate(first);
-                    cursor = cache.getFirst();
-                    next();
+                    int x = keyCompare(firstKey, first.getPrefix());
+                    next = ((firstInclusive && x == 0) || x < 0) ? new Entry(first.getPrefix(), leaf.getValue()) : null;
                 }
                 else {
                     keyBuf = ByteBuffer.allocate(100);
                     search(first, firstKey, 0, this::buildCache, null);
-                    int pos = keyBuf.position(); keyBuf.position(0);
-                    if (pos > 0) keyBuf.put(firstKey, 0, pos - 1);
-                    cursor = cache.getFirst();
-                    index = cursor.getIndex();
-                    next();
-                    if (!firstInclusive && Arrays.equals(firstKey, next.getKey())) next();
+                    cursor = cache.peekFirst();
+                    if (cursor != null) {
+                        int pos = keyBuf.position(); keyBuf.position(0);
+                        if (pos > 0) keyBuf.put(firstKey, 0, pos - 1).mark();
+                        index = cursor.getIndex();
+                        next();
+                        if (next != null) {
+                            int x = keyCompare(firstKey, next.getKey());
+                            if ((!firstInclusive || x != 0) && x >= 0) {
+                                next();
+                                while (next != null && keyCompare(firstKey, next.getKey()) > 0) {pop(); next();}
+                            }
+                        }
+                    }else { 
+                        keyBuf = ByteBuffer.allocate(100);
+                        iterate(first);
+                        cursor = cache.getFirst();
+                        next();
+                    }
                 }
                 prev = next;
             }
         }
 
+        int keyCompare(byte[] firstKey, byte[] nextKey){
+            int ret = 0;
+            int i = 0;
+            while (i < firstKey.length && i < nextKey.length && (ret = compareUnsigned(firstKey[i], nextKey[i])) == 0) i++;
+            return (ret == 0) ? Integer.compare(firstKey.length, nextKey.length) : ret;
+        }
+
         public boolean hasNext() {
-            //return (next != null && !Arrays.equals(lastKey,next.getKey()));
-            return lastInclusive ? (next != null && prev != null && !Arrays.equals(lastKey,prev.getKey())) : (next != null && !Arrays.equals(lastKey, next.getKey()));
+            if (next == null || lastKey == null) return (next != null);
+            int y = keyCompare(lastKey, next.getKey());
+            return lastInclusive ? y >= 0 : y > 0;
         }
 
         public ARTree.Entry next() {
@@ -590,32 +595,18 @@ public class ARTree {
                     next = null;
                     return prev;
                 }
-                // System.out.println("PreCurrentFull: Cache Size is "+cache.size()+"; cursor size is "+cursor.length()+" index is "+index+" "+keyBuf);
-                //try{
-                keyBuf.reset().position(Math.max(0, keyBuf.position() - (1 + cursor.prefixLen()))).mark();
-                /*}catch(Exception e){
-                    System.err.println("1+"+cursor.prefixLen());
-                    throw new RuntimeException(e);
-                }*/
-                cache.pop();
-                cursor = cache.peekFirst();
+                pop();
                 if (cursor == null) {
                     next = null;
                     return prev;
                 }
-                index = cursor.getIndex() + 1;
-                // System.out.println("PreReset: Cache Size is now "+cache.size()+"; cursor size is "+cursor.length()+" index is "+index+" "+keyBuf);
-                keyBuf.reset();
-                // System.out.println("PostCurrentFull: Cache Size is now "+cache.size()+"; cursor size is "+cursor.length()+" index is "+index+" "+keyBuf);
             }
             if (!cursor.entryAt(index).child.isLeaf()) {
                 cursor.saveIndex(index);
                 NodeEntry ne = cursor.entryAt(index);
                 if (!cursor.hasBlank() || (index != 0)) keyBuf.put(ne.radix);
-                // System.out.println("PreNextNotLeaf: Cache Size is "+cache.size()+"; cursor size is "+cursor.length()+" index is "+index+" "+keyBuf);
                 iterate(cursor.entryAt(index).child);
                 cursor = cache.getFirst();
-                // System.out.println("PostNextNotLeaf: Cache Size is now "+cache.size()+"; cursor size is "+cursor.length()+" "+keyBuf);
                 index=0;
             }
             NodeEntry ne = cursor.entryAt(index++);
@@ -628,13 +619,20 @@ public class ARTree {
             return prev;
         }
 
+        void pop() {
+            keyBuf.reset().position(Math.max(0, keyBuf.position() - (1 + cursor.prefixLen()))).mark();
+            cache.pop();
+            cursor = cache.peekFirst();
+            if (cursor != null) index = cursor.getIndex() + 1;
+            keyBuf.reset();
+        }
+
         void iterateChildren(InternalNode current) {
             NodeEntry[] entries = current.getEntries();
             boolean blank;
             cache.push(new StackItem(entries, current.getPrefixLength(), blank = current.hasBlankRadixChild()));
             if (current.getPrefixLength() > 0) keyBuf.put(current.getPrefix());
             if (!blank && !entries[0].child.isLeaf()) keyBuf.put(entries[0].radix);
-            //System.out.println("partial key: "+new String(Arrays.copyOf(keyBuf.array(),keyBuf.position()))+" "+keyBuf);
             iterate(entries[0].child);
         }
 
@@ -667,7 +665,6 @@ public class ARTree {
                     iterate(first);
                     cursor = cache.getFirst();
                     next();
-                    //System.out.println("Cache Size is "+cache.size()+"; cursor size is "+cursor.length+" index is "+index);
                 }
             }
         }
@@ -687,7 +684,6 @@ public class ARTree {
                     next = 0;
                     return prev;
                 }
-                //System.out.println("PreCurrentFull: Cache Size is "+cache.size()+"; cursor size is "+cursor.length+" index is "+index);
                 cache.pop();
                 cursor = cache.peekFirst();
                 if (cursor == null) {
@@ -695,14 +691,11 @@ public class ARTree {
                     return prev;
                 }
                 index = cursor.getIndex()+1;
-                //System.out.println("PostCurrentFull: Cache Size is now "+cache.size()+"; cursor size is "+cursor.length+" index is "+index);
             }
             if (!cursor.entryAt(index).child.isLeaf()) {
                 cursor.saveIndex(index);
-                //System.out.println("PreNextNotLeaf: Cache Size is "+cache.size()+"; cursor size is "+cursor.length+" index is "+index);
                 iterate(cursor.entryAt(index).child);
                 cursor = cache.getFirst();
-                //System.out.println("PostNextNotLeaf: Cache Size is now "+cache.size()+"; cursor size is "+cursor.length);
                 index=0;
             }
             next = ((SimpleLeaf)cursor.entryAt(index++).child).getValue();

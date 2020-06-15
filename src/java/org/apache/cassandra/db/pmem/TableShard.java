@@ -19,6 +19,7 @@
 package org.apache.cassandra.db.pmem;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.function.BiFunction;
 import com.google.common.primitives.Longs;
 import lib.llpl.TransactionalHeap;
@@ -95,7 +96,7 @@ public class TableShard
 
     public void insert(long token, PartitionUpdate update, UpdateTransaction indexer, OpOrder.Group opGroup, Transaction tx)
     {
-        arTree.apply(Longs.toByteArray(token), update, TableShard::merge, tx);
+        arTree.apply(ARTree.encodeLong(token), update, TableShard::merge, tx);
     }
 
     static Long merge(Object update, Long mb)
@@ -125,7 +126,7 @@ public class TableShard
         if(key != null)
         {
             long token = (Long) key.getToken().getTokenValue();
-            byte[] tokenBytes = Longs.toByteArray(token);
+            byte[] tokenBytes = ARTree.encodeLong(token);
             long partionAddr = arTree.get(tokenBytes);
             if (partionAddr == 0)
             {
@@ -156,7 +157,7 @@ public class TableShard
         if(decoratedKey != null)
         {
             long token = (Long) decoratedKey.getToken().getTokenValue();
-            byte[] tokenBytes = Longs.toByteArray(token);
+            byte[] tokenBytes = ARTree.encodeLong(token);
             long partionAddr = arTree.get(tokenBytes);
             if (partionAddr == 0)
             {
@@ -191,35 +192,71 @@ public class TableShard
         boolean isBound = keyRange instanceof Bounds;
         boolean includeStart = isBound || keyRange instanceof IncludingExcludingBounds;
         boolean includeStop = isBound || keyRange instanceof Range;
-        PmemPartitionIterator pMemPartitionIterator;
+        PmemPartitionIterator pMemPartitionIterator = null;
         Token.TokenFactory tokenFactory = metadata.partitioner.getTokenFactory();
+
         if (startIsMin)
         {
-            if(stopIsMin)
+            if (stopIsMin)
             {
-                pMemPartitionIterator = new PmemPartitionIterator(metadata,arTree.getEntryIterator(), heap, filter, dataRange);
+                ARTree.EntryIterator entryIterator = arTree.getEntryIterator();
+                if (entryIterator.hasNext())
+                {
+                    pMemPartitionIterator = new PmemPartitionIterator(metadata, entryIterator, heap, filter, dataRange);
+                }
             }
             else
             {
-                byte[] rightTokenBytes = tokenFactory.toByteArray(keyRange.right.getToken()).array();
-                pMemPartitionIterator = new PmemPartitionIterator(metadata,arTree.getEntryIterator(rightTokenBytes,includeStop), heap, filter, dataRange);
+
+                long token = (Long) keyRange.right.getToken().getTokenValue();
+                byte[] rightTokenBytes = ARTree.encodeLong(token);
+                ARTree.EntryIterator entryIterator = arTree.getHeadEntryIterator( rightTokenBytes, includeStop);
+                if (entryIterator.hasNext())
+                {
+                    pMemPartitionIterator = new PmemPartitionIterator(metadata, entryIterator, heap, filter, dataRange);
+                }
             }
         }
         else
         {
-            if(stopIsMin)
+            if (stopIsMin)
             {
-                byte[] leftTokenBytes = tokenFactory.toByteArray(keyRange.left.getToken()).array();
-                pMemPartitionIterator = new PmemPartitionIterator(metadata,arTree.getEntryIterator(leftTokenBytes, includeStart), heap, filter, dataRange);
+                long token = (Long) keyRange.left.getToken().getTokenValue();
+                byte[] leftTokenBytes = ARTree.encodeLong(token);
+                ARTree.EntryIterator entryIterator = arTree.getTailEntryIterator(leftTokenBytes, includeStart);
+                if (entryIterator.hasNext())
+                {
+                    pMemPartitionIterator = new PmemPartitionIterator(metadata, entryIterator, heap, filter, dataRange);
+                }
             }
             else
             {
-                byte[]  leftTokenBytes = tokenFactory.toByteArray(keyRange.left.getToken()).array();
-                byte[] rightTokenBytes = tokenFactory.toByteArray(keyRange.right.getToken()).array();
-                pMemPartitionIterator = new PmemPartitionIterator(metadata,arTree.getEntryIterator(leftTokenBytes,includeStart,rightTokenBytes,includeStop), heap, filter, dataRange);
+                byte[] leftTokenBytes;
+                byte[] rightTokenBytes;
+                if (keyRange.left.getToken() instanceof LongToken)
+                {
+                    leftTokenBytes = ARTree.encodeLong((Long) keyRange.left.getToken().getTokenValue());
+                }
+                else
+                {
+                    leftTokenBytes = tokenFactory.toByteArray(keyRange.left.getToken()).array();
+                }
+                if (keyRange.right.getToken() instanceof LongToken)
+                {
+                    rightTokenBytes = ARTree.encodeLong((Long) keyRange.right.getToken().getTokenValue());
+                }
+                else
+                {
+                    rightTokenBytes = tokenFactory.toByteArray(keyRange.right.getToken()).array();
+                }
+                ARTree.EntryIterator entryIterator = arTree.getEntryIterator(leftTokenBytes, includeStart, rightTokenBytes, includeStop);
+                if (entryIterator.hasNext())
+                {
+                    pMemPartitionIterator = new PmemPartitionIterator(metadata, entryIterator, heap, filter, dataRange);
+                }
             }
-
         }
+
         return pMemPartitionIterator;
     }
 

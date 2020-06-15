@@ -29,6 +29,7 @@ import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.EmptyIterators;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.Slice;
@@ -76,8 +77,6 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
         this.metadata = metadata;
         this.heap = heap;
         this.header =  SerializationHeader.makeWithoutStats(metadata);
-     //   this.clusteringDeserializer = new ClusteringPrefix.Deserializer(metadata.comparator, in, header);
-       // this.builder = BTreeRow.sortedBuilder();
         this.pmemRowTree = new ARTree(heap,pmemRowMapTreeAddr);
 
         this.dkey = key; //TODO: need to read from persistent
@@ -90,46 +89,51 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
         if(dataRange != null) //TODO: This needs to be moved to a better place & some serious renaming needed & refactored
         {
             ClusteringIndexFilter clusteringIndexFilter = dataRange.clusteringIndexFilter(key);
-            if ( clusteringIndexFilter != null && clusteringIndexFilter.getSlices(metadata) != Slices.ALL) //Read slices
+            Slices slices = clusteringIndexFilter.getSlices(metadata);
+            if (slices.size() == 1)
             {
-                Slices slices = clusteringIndexFilter.getSlices(metadata);
-                if (slices.size() == 1)
+                Slice slice = slices.get(0);
+                boolean includeStart = slice.start().isInclusive();
+                boolean includeEnd = slice.end().isInclusive();
+                ClusteringBound start = slice.start() == ClusteringBound.BOTTOM ? null : slice.start();
+                ClusteringBound end = slice.end() == ClusteringBound.TOP ? null : slice.end();
+                Clustering clusteringStart;
+                Clustering clusteringEnd;
+                ByteBuffer clusteringBufferStart;
+                ByteBuffer clusteringBufferEnd;
+
+
+                if ((start != null && start.size() != 0) && (end != null && end.size() != 0))
                 {
-                    Slice slice = slices.get(0);
-                    boolean includeStart = clusteringIndexFilter.getSlices(metadata).get(0).start().isInclusive();
-                    boolean includeEnd = clusteringIndexFilter.getSlices(metadata).get(0).end().isInclusive();
-                    ClusteringBound start = slice.start() == ClusteringBound.BOTTOM ? null : slice.start();
-                    ClusteringBound end = slice.end() == ClusteringBound.TOP ? null : slice.end();
-                    Clustering clusteringStart;
-                    Clustering clusteringEnd;
-                    ByteBuffer clusteringBufferStart;
-                    ByteBuffer clusteringBufferEnd;
-
-
-                    if ((start != null && start.size() != 0) && (end != null && end.size() != 0))//TODO:
-                    {
-                        clusteringStart = Clustering.make(start.getRawValues());
-                        clusteringBufferStart = Clustering.serializer.serialize(clusteringStart, -1, metadata.comparator.subtypes());
-                        clusteringEnd = Clustering.make(start.getRawValues());
-                        clusteringBufferEnd = Clustering.serializer.serialize(clusteringEnd, -1, metadata.comparator.subtypes());
-                        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator(clusteringBufferStart.array(), includeStart, clusteringBufferEnd.array(), includeEnd);
-                    }
-                    else if ((start != null) && (start.size() != 0))
-                    {
-                        Clustering clustering;
-                        clustering = Clustering.make(start.getRawValues());
-                        clusteringBufferStart = Clustering.serializer.serialize(clustering, -1, metadata.comparator.subtypes());
-                        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator(clusteringBufferStart.array(), includeStart);
-                    }
-                    else
-                        this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
-
+                    clusteringStart = Clustering.make(start.getRawValues());
+                    clusteringBufferStart = Clustering.serializer.serialize(clusteringStart, -1, metadata.comparator.subtypes());
+                    clusteringEnd = Clustering.make(start.getRawValues());
+                    clusteringBufferEnd = Clustering.serializer.serialize(clusteringEnd, -1, metadata.comparator.subtypes());
+                    this.pmemRowTreeIterator = pmemRowTree.getEntryIterator(clusteringBufferStart.array(), includeStart, clusteringBufferEnd.array(), includeEnd);
                 }
-                else //TODO: Need to handle multiple slices
+                else if ((start != null) && (start.size() != 0) )
+                {
+                    Clustering clustering;
+                    clustering = Clustering.make(start.getRawValues());
+                    clusteringBufferStart = Clustering.serializer.serialize(clustering, -1, metadata.comparator.subtypes());
+                    this.pmemRowTreeIterator = pmemRowTree.getTailEntryIterator(clusteringBufferStart.array(), includeStart);
+                }
+                else if ((end != null) && (end.size() != 0))
+                {
+                    Clustering clustering;
+                    clustering = Clustering.make(end.getRawValues());
+                    clusteringBufferEnd = Clustering.serializer.serialize(clustering, -1, metadata.comparator.subtypes());
+                    this.pmemRowTreeIterator = pmemRowTree.getHeadEntryIterator(clusteringBufferEnd.array(), includeEnd);
+                }
+                else
+                {
                     this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
+                }
             }
-            else
+            else //TODO: Handle slices iterator better
+            {
                 this.pmemRowTreeIterator = pmemRowTree.getEntryIterator();
+            }
         }
         else
         {
@@ -158,7 +162,8 @@ public class PmemRowMapIterator extends AbstractIterator<Unfiltered> implements 
     protected Unfiltered computeNext() //TODO: This is a roundabout way. Revisit
     {
         Row.Builder builder = BTreeRow.sortedBuilder();
-
+        if(pmemRowTreeIterator == null)
+            return endOfData();
         while (pmemRowTreeIterator.hasNext())
         {
             ARTree.Entry nextEntry = pmemRowTreeIterator.next();

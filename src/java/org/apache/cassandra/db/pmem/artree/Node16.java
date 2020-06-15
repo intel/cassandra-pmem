@@ -1,4 +1,9 @@
-// TODO: COPYRIGHT HEADER
+/*
+ * Copyright (C) 2018-2020 Intel Corporation
+ *
+ * SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
+ *
+ */
 
 package org.apache.cassandra.db.pmem.artree;
 
@@ -53,7 +58,7 @@ public class Node16 extends InternalNode {
         for (int i=0; i < entries.length; i++) {
             if (i != blankIndex) entries[index++] = new NodeEntry(radices[i], getChildAtIndex(i));
         }
-        Arrays.sort(entries, (hasBlank) ? 1 : 0, entries.length, (x, y)-> Integer.compareUnsigned(Byte.toUnsignedInt(x.radix), Byte.toUnsignedInt(y.radix)));
+        Arrays.sort(entries, (hasBlank) ? 1 : 0, entries.length, (x, y)-> ARTree.compareUnsigned(x.radix, y.radix));
         return entries;
     }
 
